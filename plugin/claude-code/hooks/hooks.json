@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v witness >/dev/null 2>&1 || exit 0; witness hook post-tool-use",
+            "command": "W=$(command -v witness || echo \"$HOME/.cargo/bin/witness\"); [ -x \"$W\" ] || exit 0; \"$W\" hook post-tool-use",
             "timeout": 10
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v witness >/dev/null 2>&1 || exit 0; witness hook post-tool-use-failure",
+            "command": "W=$(command -v witness || echo \"$HOME/.cargo/bin/witness\"); [ -x \"$W\" ] || exit 0; \"$W\" hook post-tool-use-failure",
             "timeout": 10
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v witness >/dev/null 2>&1 || exit 0; witness hook session-end"
+            "command": "W=$(command -v witness || echo \"$HOME/.cargo/bin/witness\"); [ -x \"$W\" ] || exit 0; \"$W\" hook session-end"
           }
         ]
       }

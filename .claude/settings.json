@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "witness": {
+      "source": {
+        "source": "github",
+        "repo": "radical-studios/witness"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "witness@witness": true
+  }
+}

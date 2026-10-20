@@ -98,6 +98,16 @@ states. Never tool output, file contents or environment variables. See
 
 ## Development
 
+This repository records its own agent sessions with Witness. Claude Code
+offers the `witness` plugin when you open the repo (from
+`.claude/settings.json`); the hooks also need the binary from this checkout:
+
+```bash
+cargo install --path crates/witness   # rerun after changing the Rust code
+```
+
+Commit `.witness/sessions/` along with your changes.
+
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings

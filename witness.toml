@@ -1,0 +1,43 @@
+# Witness configuration. See docs/ARCHITECTURE.md.
+
+[report]
+# Cap on how many sections the report flags for close review.
+max_flagged = 10
+
+# Regexes matched against each simple command the agent runs, after leading
+# VAR=value assignments and wrappers (timeout, time, env, nice) are removed.
+# A passing `test` or `build` run after an edit marks that edit as checked.
+[commands]
+test = [
+  '^cargo (\+\S+ )?(test|nextest)\b',
+  '^(npm|pnpm|yarn|bun)( run)? test\b',
+  '^(npx |pnpm exec |yarn )?(jest|vitest|mocha)\b',
+  '^(python3? -m )?pytest\b',
+  '^(uv|poetry) run (python3? -m )?pytest\b',
+  '^go test\b',
+  '^(\./)?gradlew?( \S+)* (\S*:)?(test|check)\b',
+  '^(\./)?mvnw?( \S+)* (test|verify)\b',
+]
+build = [
+  '^cargo (\+\S+ )?(build|check)\b',
+  '^(npm|pnpm|yarn|bun)( run)? build\b',
+  '^(npx )?tsc\b',
+  '^go build\b',
+  '^(\./)?gradlew?( \S+)* (\S*:)?(build|assemble|compile\w*)\b',
+  '^(\./)?mvnw?( \S+)* (compile|package|install)\b',
+]
+lint = [
+  '^cargo (clippy|fmt)\b',
+  '^(npm|pnpm|yarn|bun)( run)? (lint|format)\b',
+  '^(npx )?(eslint|prettier|biome)\b',
+  '^(ruff|flake8|pylint|mypy|black)\b',
+  '^go vet\b',
+  '^golangci-lint\b',
+  '^gofmt\b',
+]
+
+# Areas group paths for the agent track record (not computed yet).
+# The first matching area wins; unmatched paths fall in "default".
+# [[areas]]
+# name = "core"
+# paths = ["src/core/**"]
