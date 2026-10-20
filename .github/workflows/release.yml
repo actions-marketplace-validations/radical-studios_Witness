@@ -2,7 +2,9 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    # Release tags only: v0.2.0, v0.3.0-rc.1. Not the floating major tag
+    # (v0) that the publish job moves.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
 
 permissions:
   contents: read
@@ -33,11 +35,13 @@ jobs:
       - name: Install musl tools
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Check the tag matches the version
+      - name: Check the tag matches the versions
         shell: bash
         run: |
           version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "witness") | .version')"
           test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != version $version"; exit 1; }
+          plugin="$(jq -r .version plugin/claude-code/.claude-plugin/plugin.json)"
+          test "$plugin" = "$version" || { echo "plugin version $plugin != $version"; exit 1; }
       - name: Build
         run: cargo build --release --locked -p witness --target ${{ matrix.target }}
       - name: Package
@@ -71,5 +75,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          pre=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then pre=(--prerelease); fi
           gh release create "$GITHUB_REF_NAME" dist/* install.sh install.ps1 \
-            --title "Witness $GITHUB_REF_NAME" --generate-notes --verify-tag
+            --title "Witness $GITHUB_REF_NAME" --generate-notes --verify-tag "${pre[@]}"
+      # `uses: radical-studios/witness@v0` follows the latest stable release.
+      - name: Move the major version tag
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          major="${GITHUB_REF_NAME%%.*}"
+          git tag -f "$major" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$major"

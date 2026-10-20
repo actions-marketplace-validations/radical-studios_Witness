@@ -1,5 +1,23 @@
 # Witness roadmap: from prototype to a trustworthy, agent-agnostic 1.0
 
+## Status
+
+Milestones M0 to M8 below are implemented in 0.2.0 (see
+[CHANGELOG.md](../CHANGELOG.md)). Where the implementation differs from the
+plan:
+
+- **HTTP:** posting uses the `curl` binary instead of `ureq`. That keeps TLS
+  out of the binary, and proxies and certificates behave as for other CI
+  tools.
+- **Reverts:** a revert is detected only from the "This reverts commit"
+  message. The "≤20% survival within a revert window" rule was dropped:
+  a section whose lines are gone is reported as *rewritten*.
+- **`witness init`:** there is no `--yes`, because `init` never prompts.
+  Agent detection replaces stack detection: the default command patterns
+  already cover the common stacks.
+
+What remains before 1.0 is in [1.0 criteria](#10-criteria) at the end.
+
 ## Context
 
 Witness records what a coding agent verified versus what it guessed, then turns
@@ -410,3 +428,27 @@ Ordered by dependency. Each milestone is a series of commits that leaves
 - **Snapshot cost on very large repos:** the time budget and
   `[capture] snapshots = false` are the escape hatches. Measure on a large
   open-source repo during M1.
+
+## 1.0 criteria
+
+1.0 promises a stable session log format, report JSON, config and CLI.
+Before tagging it:
+
+- **Real payloads for every adapter.** Cursor and Gemini CLI adapters were
+  built from documentation. They leave beta once fixtures captured from
+  real sessions pass. The same goes for Copilot's cloud agent end to end,
+  including whether hook-written files land in its commits.
+- **Dogfooding.** At least a month of this repository's own pull requests
+  reviewed with the Action, with every misattribution or misclassification
+  fixed or documented.
+- **Calibration on real history.** On at least one repository with 100+
+  landed agent changes, `witness stats` shows flagged sections rewritten
+  noticeably more often than tested ones. If not, the rules change before
+  the format freezes.
+- **Platforms.** The release builds and the Action verified on Linux, macOS
+  and Windows runners, and the GitLab template on a real merge request.
+- **Performance budgets** from the cross-cutting rules measured on a
+  10k-file repository and written down in `docs/ARCHITECTURE.md`.
+- **Format review.** A last pass over record kinds, report fields and config
+  keys, since after 1.0 removing or renaming any of them needs a major
+  version.

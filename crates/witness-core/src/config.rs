@@ -504,7 +504,7 @@ pub fn default_toml() -> String {
             .join("\n")
     };
     format!(
-        r#"# Witness configuration. See docs/ARCHITECTURE.md.
+        r#"# Witness configuration. See docs/CONFIG.md.
 
 [report]
 # Cap on how many sections the report flags for close review.

@@ -2,12 +2,15 @@
 
 Witness records sessions from any coding agent that can run a command on
 its tool calls (a "hook"), and from any agent or script through
-`witness exec` and `witness record`. Install the hooks for the agents your
-team uses with:
+`witness exec` and `witness record`. `witness init` installs hooks for the
+agents it detects: their config directory or instruction file in the
+repository, or their CLI on `PATH` (`--agents` chooses them, `--no-hooks`
+skips this). Afterwards, manage them with:
 
 ```bash
 witness hooks install claude-code codex copilot   # or: --all
 witness hooks status
+witness doctor                                     # is everything recording?
 ```
 
 The hooks run `witness hook --agent <agent> <event>`. They do nothing when

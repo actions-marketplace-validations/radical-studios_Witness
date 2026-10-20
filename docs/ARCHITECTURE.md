@@ -14,7 +14,7 @@ in the repository.
  git diff base...head ──▶ hunks ──┐            │
                                   ▼            ▼
                     witness-core: replay events → attribute lines by content
-                                  → classify → report (markdown | json)
+                                  → classify → report (markdown | text | json | sarif | ...)
                                                │
                          witness-platform: github | gitlab | dry-run
 ```
@@ -23,10 +23,10 @@ in the repository.
 
 | Crate               | Role | I/O |
 | ------------------- | ---- | --- |
-| `witness-core`      | Data model, record format, hook payload parsing, command classification and redaction, config parsing, event→hunk matching, hunk classification, report rendering, track-record types. | None. Callers pass in strings, file contents and a clock. |
+| `witness-core`      | Data model, record format, hook payload parsing, command classification and redaction, config parsing, event→hunk matching, hunk classification, signals, test summaries and scopes, claims, report rendering, track-record aggregation. | None. Callers pass in strings, file contents and a clock. |
 | `witness-git`       | `Git` trait over the `git` CLI (`diff`, `rev-parse`, `merge-base`, `ls-tree`, `show`, `log`, `blame`), working-tree snapshots through a private index, and a unified-diff parser that turns `git diff -U0` into `Hunk`s. | Spawns `git`. No libgit2. |
 | `witness-platform`  | `Platform` trait with GitHub (issue comments), GitLab (MR notes) and dry-run adapters, over an `Http` trait. | HTTP through the `curl` binary; dry run writes to the given writer. |
-| `witness`           | CLI (clap derive): `init`, `hooks`, `hook`, `assume`, `exec`, `record`, `report`, `post`. Owns all filesystem access, snapshots, and wires the crates together. | Filesystem, stdin/stdout, child processes, `git` via `witness-git`. |
+| `witness`           | CLI (clap derive): `init`, `hooks`, `hook`, `assume`, `exec`, `record`, `status`, `report`, `explain`, `sessions`, `stats`, `post`, `doctor`, `prune`. Owns all filesystem access, snapshots, the report pipeline, the history builder and the end-of-turn nudges, and wires the crates together. | Filesystem, stdin/stdout, child processes, `git` via `witness-git`. |
 
 Dependency direction: `witness` → `witness-platform`, `witness-git` →
 `witness-core`. Core depends on nothing in the workspace.
@@ -283,7 +283,7 @@ newlines (quote-aware); leading `VAR=value` assignments and wrappers like
 `timeout`, `time`, `env`, `nice` are stripped before matching; the strongest
 class wins (`test` > `build` > `lint` > `other`).
 
-## Limitations of v0
+## Limitations
 
 - **Repeated short lines.** Content matching can't tell two identical
   short lines apart; they count as the agent's only near its recorded range

@@ -51,14 +51,19 @@ impl Report {
         if s.lines.agent > 0 {
             let pct = |n: usize| (n * 100 + s.lines.agent / 2) / s.lines.agent;
             let unchecked = s.lines.agent - s.lines.tested - s.lines.compiled;
+            let mut parts = vec![format!("{}% tested", pct(s.lines.tested))];
+            if s.lines.compiled > 0 {
+                parts.push(format!("{}% only compiled", pct(s.lines.compiled)));
+            }
+            if unchecked > 0 {
+                parts.push(format!("{}% unchecked", pct(unchecked)));
+            }
             let _ = writeln!(
                 out,
-                "  {} agent {}: {}% tested, {}% only compiled, {}% unchecked",
+                "  {} agent {}: {}",
                 s.lines.agent,
                 plural(s.lines.agent, "line", "lines"),
-                pct(s.lines.tested),
-                pct(s.lines.compiled),
-                pct(unchecked)
+                parts.join(", ")
             );
         }
         let width = self

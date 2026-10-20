@@ -529,6 +529,14 @@ mod tests {
     /// The Claude Code plugin ships the same hooks `witness hooks install
     /// claude-code` writes.
     #[test]
+    fn plugin_version_matches_the_binary() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugin/claude-code/.claude-plugin/plugin.json");
+        let plugin: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(plugin["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
     fn plugin_hooks_match_the_installer() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin/claude-code/hooks/hooks.json");
