@@ -1,95 +1,66 @@
-//! `witness report` and `witness post`: git + session logs → report.
+//! Gathering what a report is computed from: the diff, the session logs
+//! written on the branch, package manifests and commit attribution.
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use witness_core::history::NullHistoryStore;
 use witness_core::provenance::Segment;
-use witness_core::record::parse_log;
+use witness_core::record::{Event, parse_log};
 use witness_core::report::{self, ReportInput};
 use witness_core::scope::{self, Packages};
 use witness_core::{Config, DefaultRules, Hunk, Report};
 use witness_git::{Git, GitCli};
-use witness_platform::{DryRun, Platform, PostTarget, RenderedReport, github, gitlab};
 
-use crate::cli::{Format, PlatformArg, PostArgs, RangeArgs, ReportArgs};
 use crate::workspace::{self, CONFIG_FILE, SESSIONS_DIR, WITNESS_DIR};
 
-pub fn run_report(args: ReportArgs) -> Result<()> {
-    let report = report_for(&args.range)?;
-    match args.format {
-        Format::Markdown => print!("{}", report.to_markdown()),
-        Format::Json => println!("{}", report.to_json()?),
+/// The repository a command runs in.
+pub struct Repo {
+    pub git: GitCli,
+    /// The directory holding `.witness/` (or the top level).
+    pub root: PathBuf,
+    /// `root` relative to the top level: empty, or `/`-terminated.
+    pub prefix: String,
+    pub config: Config,
+}
+
+impl Repo {
+    pub fn open() -> Result<Self> {
+        let cwd = std::env::current_dir().context("finding the working directory")?;
+        let toplevel = GitCli::new(&cwd)
+            .toplevel()
+            .context("witness must run inside a git repository")?;
+        let git = GitCli::new(&toplevel);
+        let (root, prefix) = workspace::witness_root(&cwd, &toplevel);
+        let config = workspace::load_config(&root)?;
+        Ok(Self {
+            git,
+            root,
+            prefix,
+            config,
+        })
     }
-    Ok(())
+
+    /// Whether `rev` is the checked-out commit, so the working tree's
+    /// session logs (a superset of the committed ones) can be read.
+    pub fn is_checked_out(&self, rev: &str) -> bool {
+        let rev = self.git.rev_parse(rev).ok();
+        rev.is_some() && rev == self.git.rev_parse("HEAD").ok()
+    }
 }
 
-pub fn run_post(args: PostArgs) -> Result<()> {
-    let report = report_for(&args.range)?;
-    let rendered = RenderedReport {
-        markdown: report.to_markdown(),
-    };
-    let target = PostTarget {
-        repository: args.repo,
-        number: args.number,
-    };
-    let stdout = std::io::stdout();
-    let dry_run = DryRun::new(stdout.lock());
-    let platform: &dyn Platform = match args.platform {
-        PlatformArg::DryRun => &dry_run,
-        PlatformArg::Github => &github::GitHub,
-        PlatformArg::Gitlab => &gitlab::GitLab,
-    };
-    platform
-        .post(&rendered, &target)
-        .with_context(|| format!("posting to {}", platform.name()))?;
-    Ok(())
+/// What a report is computed from.
+pub struct Gathered {
+    pub hunks: Vec<Hunk>,
+    pub sessions: Vec<Vec<Event>>,
+    pub skipped: usize,
 }
 
-fn report_for(range: &RangeArgs) -> Result<Report> {
-    let cwd = std::env::current_dir().context("finding the working directory")?;
-    let toplevel = GitCli::new(&cwd)
-        .toplevel()
-        .context("witness report must run inside a git repository")?;
-    let git = GitCli::new(&toplevel);
-    let (root, prefix) = workspace::witness_root(&cwd, &toplevel);
-    let config = workspace::load_config(&root)?;
-    // Uncommitted session logs count when reporting on the checked-out commit.
-    let head_sha = git.rev_parse(&range.head).ok();
-    let current_sha = git.rev_parse("HEAD").ok();
-    let worktree = (head_sha.is_some() && head_sha == current_sha).then_some(root.as_path());
-    compute(
-        &git,
-        &Request {
-            base: &range.base,
-            head: &range.head,
-            prefix: &prefix,
-            worktree,
-        },
-        &config,
-    )
-}
-
-/// What to report on.
-#[derive(Debug, Clone, Copy)]
-pub struct Request<'a> {
-    pub base: &'a str,
-    pub head: &'a str,
-    /// Directory holding `.witness/`, relative to the git top level: empty,
-    /// or `/`-terminated. Only changes under it are reported, with paths
-    /// relative to it.
-    pub prefix: &'a str,
-    /// When given, session logs in this directory's `.witness/sessions/`
-    /// replace the committed copies (logs are append-only, so the working
-    /// tree holds a superset).
-    pub worktree: Option<&'a Path>,
-}
-
-/// Builds the report for `base...head`.
-pub fn compute(git: &dyn Git, req: &Request<'_>, config: &Config) -> Result<Report> {
+/// Reads the diff and the session logs for `req`.
+pub fn gather(git: &dyn Git, req: &Request<'_>) -> Result<Gathered> {
     let Request {
         base, head, prefix, ..
     } = *req;
@@ -97,8 +68,13 @@ pub fn compute(git: &dyn Git, req: &Request<'_>, config: &Config) -> Result<Repo
         git.rev_parse(rev)
             .map_err(|err| anyhow!("unknown revision {rev:?}: {err}"))?;
     }
-    let hunks: Vec<Hunk> = witness_git::hunks(git, base, head)
-        .with_context(|| format!("diffing {base}...{head}"))?
+    let raw = match req.diff {
+        Some(text) => text.to_owned(),
+        None => git
+            .diff(base, head)
+            .with_context(|| format!("diffing {base}...{head}"))?,
+    };
+    let hunks: Vec<Hunk> = witness_git::parse_unified_diff(&raw)?
         .into_iter()
         .filter_map(|mut h| {
             h.file = h.file.strip_prefix(prefix)?.to_owned();
@@ -116,35 +92,84 @@ pub fn compute(git: &dyn Git, req: &Request<'_>, config: &Config) -> Result<Repo
             sessions.push(parsed.events);
         }
     }
+    Ok(Gathered {
+        hunks,
+        sessions,
+        skipped,
+    })
+}
 
-    let recorded: HashSet<String> = sessions.iter().flatten().map(|e| e.agent.clone()).collect();
+/// Runs `f` with the [`ReportInput`] for `gathered`, and the package
+/// lookups it uses.
+pub fn with_input<T>(
+    git: &dyn Git,
+    req: &Request<'_>,
+    config: &Config,
+    gathered: Gathered,
+    f: impl FnOnce(ReportInput<'_>, &dyn Packages) -> T,
+) -> T {
+    let recorded: HashSet<String> = gathered
+        .sessions
+        .iter()
+        .flatten()
+        .map(|e| e.agent.clone())
+        .collect();
     let commit_agent = CommitAgents {
         git,
-        head,
-        prefix,
+        head: req.head,
+        prefix: req.prefix,
         config,
         recorded,
         commits: RefCell::new(HashMap::new()),
     };
     let packages = PackageIndex {
         git,
-        head,
-        prefix,
+        head: req.head,
+        prefix: req.prefix,
         files: OnceCell::new(),
         names: OnceCell::new(),
     };
-    Ok(report::build(ReportInput {
-        base,
-        head,
-        hunks: &hunks,
-        sessions,
-        skipped_lines: skipped,
+    let commit_agent_fn = |segment: &Segment| commit_agent.for_segment(segment);
+    let input = ReportInput {
+        base: req.base,
+        head: req.head,
+        prefix: req.prefix,
+        hunks: &gathered.hunks,
+        sessions: gathered.sessions,
+        skipped_lines: gathered.skipped,
         config,
         classifier: &DefaultRules,
         history: &NullHistoryStore,
         packages: &packages,
-        commit_agent: &|segment| commit_agent.for_segment(segment),
+        commit_agent: &commit_agent_fn,
+    };
+    f(input, &packages)
+}
+
+/// Builds the report for `req`.
+pub fn compute(git: &dyn Git, req: &Request<'_>, config: &Config) -> Result<Report> {
+    let gathered = gather(git, req)?;
+    Ok(with_input(git, req, config, gathered, |input, _| {
+        report::build(input)
     }))
+}
+
+/// What to report on.
+#[derive(Debug, Clone, Copy)]
+pub struct Request<'a> {
+    pub base: &'a str,
+    pub head: &'a str,
+    /// Directory holding `.witness/`, relative to the git top level: empty,
+    /// or `/`-terminated. Only changes under it are reported, with paths
+    /// relative to it.
+    pub prefix: &'a str,
+    /// When given, session logs in this directory's `.witness/sessions/`
+    /// replace the committed copies (logs are append-only, so the working
+    /// tree holds a superset).
+    pub worktree: Option<&'a Path>,
+    /// Diff text to use instead of `git diff base...head` (e.g. against
+    /// the working tree).
+    pub diff: Option<&'a str>,
 }
 
 /// Package manifests at head, read on first use.
@@ -346,6 +371,7 @@ mod tests {
             head: "HEAD",
             prefix: "",
             worktree,
+            diff: None,
         }
     }
 

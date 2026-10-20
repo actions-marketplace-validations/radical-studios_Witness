@@ -1,19 +1,32 @@
-//! Builds the review plan and renders it as markdown or JSON.
+//! Builds the review plan. Renderers: [`Report::to_markdown`],
+//! [`Report::to_text`], [`Report::to_sarif`],
+//! [`Report::to_github_annotations`], [`Report::to_gitlab_codequality`]
+//! and JSON.
 
-use std::collections::HashSet;
-use std::fmt::Write as _;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::classify::{Classifier, ClassifyContext, Evidence, Status, Verdict};
 use crate::config::Config;
 use crate::history::{HistoryStore, HunkFingerprint};
 use crate::hunk::Hunk;
 use crate::provenance::{self, Segment};
-use crate::record::Event;
+use crate::record::{CommandClass, Event, EventKind};
 use crate::scope::Packages;
-use crate::signals::{self, Signal};
+use crate::signals::{self, Signal, SignalKind};
+use crate::testsum::{RunOutcome, TestCounts};
 use crate::timeline::Timeline;
+
+mod annotations;
+pub mod explain;
+mod markdown;
+mod sarif;
+mod text;
+
+pub use markdown::MarkdownOptions;
+pub use text::TextOptions;
 
 /// Hidden marker on the first line of the markdown report. Platform adapters
 /// look for it to update their previous comment instead of adding one.
@@ -27,6 +40,13 @@ pub struct Report {
     pub schema_version: u32,
     pub base: String,
     pub head: String,
+    /// The head commit, when known; section links point at it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    /// Directory of `.witness/` relative to the repository root: empty, or
+    /// `/`-terminated. Section paths are relative to it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
     pub summary: Summary,
     /// Sections to look at closely, highest priority first, up to the cap.
     pub flagged: Vec<Section>,
@@ -34,7 +54,48 @@ pub struct Report {
     pub over_cap: Vec<Section>,
     /// Sections to skim, by path.
     pub skim: Vec<Section>,
+    /// The agents' test and build runs on this branch, oldest first (the
+    /// latest [`MAX_RUNS`]).
+    #[serde(default)]
+    pub runs: Vec<Run>,
+    /// Who did the work.
+    #[serde(default)]
+    pub agents: Vec<AgentSummary>,
     pub track_record: TrackRecordNote,
+}
+
+/// Runs kept in [`Report::runs`].
+pub const MAX_RUNS: usize = 20;
+
+/// A test or build run by an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Run {
+    pub agent: String,
+    pub command: String,
+    pub class: CommandClass,
+    /// Absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<RunOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<TestCounts>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub filtered: bool,
+    #[serde(with = "crate::record::timestamp")]
+    pub at: OffsetDateTime,
+}
+
+/// One agent's activity on the branch.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSummary {
+    pub agent: String,
+    pub sessions: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    /// Distinct turns (user prompts), when the agent reports them.
+    pub turns: usize,
+    pub edits: usize,
+    pub runs: usize,
+    pub assumptions: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +148,9 @@ pub struct Section {
     pub evidence: Evidence,
     /// Lines this section adds.
     pub lines_added: usize,
+    /// Link to the lines on the code host, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     pub fingerprint: HunkFingerprint,
 }
 
@@ -100,6 +164,8 @@ pub struct TrackRecordNote {
 pub struct ReportInput<'a> {
     pub base: &'a str,
     pub head: &'a str,
+    /// See [`Report::prefix`].
+    pub prefix: &'a str,
     pub hunks: &'a [Hunk],
     /// One event list per session, each in file order.
     pub sessions: Vec<Vec<Event>>,
@@ -123,7 +189,18 @@ pub fn no_commit_agent(_: &Segment) -> Option<String> {
 const ESCALATING_SIGNAL_SCORE: u32 = 20;
 const SIGNAL_SCORE: u32 = 5;
 
-pub fn build(input: ReportInput<'_>) -> Report {
+/// Everything decided about a change, before it is arranged into a report.
+pub struct Analysis {
+    pub timeline: Timeline,
+    pub segments: Vec<Segment>,
+    /// For each segment, its section (`None` for human-written ones) and
+    /// whether it is for close review.
+    pub sections: Vec<Option<(Section, bool)>>,
+    pub summary: Summary,
+}
+
+/// Attributes, classifies and scores every segment of the change.
+pub fn analyze(input: ReportInput<'_>) -> Analysis {
     let config = input.config;
     let session_count = input.sessions.len();
     let timeline = Timeline::build(input.sessions);
@@ -139,13 +216,12 @@ pub fn build(input: ReportInput<'_>) -> Report {
         .map(|s| s.hunk)
         .collect();
 
-    let mut flagged = Vec::new();
-    let mut skim = Vec::new();
     let mut summary = Summary {
         sessions: session_count,
         skipped_lines: input.skipped_lines,
         ..Summary::default()
     };
+    let mut sections = Vec::with_capacity(segments.len());
     for segment in &segments {
         let mut verdict = input.classifier.classify(segment, &ctx);
         if verdict.status == Status::Human
@@ -164,6 +240,7 @@ pub fn build(input: ReportInput<'_>) -> Report {
         match verdict.status {
             Status::Human => {
                 summary.human += 1;
+                sections.push(None);
                 continue;
             }
             Status::Failing => summary.failing += 1,
@@ -212,8 +289,27 @@ pub fn build(input: ReportInput<'_>) -> Report {
             score,
             evidence: verdict.evidence,
             lines_added,
+            url: None,
             fingerprint: HunkFingerprint::new(&segment.file, &segment.added),
         };
+        sections.push(Some((section, close)));
+    }
+    Analysis {
+        timeline,
+        segments,
+        sections,
+        summary,
+    }
+}
+
+pub fn build(input: ReportInput<'_>) -> Report {
+    let (config, history) = (input.config, input.history);
+    let (base, head, prefix) = (input.base, input.head, input.prefix);
+    let analysis = analyze(input);
+    let mut summary = analysis.summary;
+    let mut flagged = Vec::new();
+    let mut skim = Vec::new();
+    for (section, close) in analysis.sections.into_iter().flatten() {
         if close {
             flagged.push(section);
         } else {
@@ -238,7 +334,7 @@ pub fn build(input: ReportInput<'_>) -> Report {
     let any_record = flagged.iter().chain(&skim).any(|s| {
         s.agent
             .as_deref()
-            .is_some_and(|agent| matches!(input.history.track_record(agent, &s.area), Ok(Some(_))))
+            .is_some_and(|agent| matches!(history.track_record(agent, &s.area), Ok(Some(_))))
     });
     let track_record = TrackRecordNote {
         available: any_record,
@@ -251,14 +347,88 @@ pub fn build(input: ReportInput<'_>) -> Report {
 
     Report {
         schema_version: REPORT_SCHEMA_VERSION,
-        base: input.base.to_owned(),
-        head: input.head.to_owned(),
+        base: base.to_owned(),
+        head: head.to_owned(),
+        head_sha: None,
+        prefix: prefix.to_owned(),
         summary,
         flagged,
         over_cap,
         skim,
+        runs: runs(&analysis.timeline),
+        agents: agents(&analysis.timeline),
         track_record,
     }
+}
+
+fn runs(timeline: &Timeline) -> Vec<Run> {
+    let all: Vec<Run> = timeline
+        .events
+        .iter()
+        .filter_map(|p| match &p.event.kind {
+            EventKind::Command {
+                classification,
+                command,
+                tests,
+                scope,
+                ..
+            } if classification.verifies() => Some(Run {
+                agent: p.event.agent.clone(),
+                command: command.clone(),
+                class: *classification,
+                outcome: p.event.run_outcome(),
+                tests: *tests,
+                filtered: scope.as_ref().is_some_and(|s| s.filtered),
+                at: p.event.timestamp,
+            }),
+            _ => None,
+        })
+        .collect();
+    let skip = all.len().saturating_sub(MAX_RUNS);
+    all.into_iter().skip(skip).collect()
+}
+
+fn agents(timeline: &Timeline) -> Vec<AgentSummary> {
+    let mut by_agent: BTreeMap<&str, (AgentSummary, HashSet<&str>, HashSet<&str>)> =
+        BTreeMap::new();
+    for p in &timeline.events {
+        let e = &p.event;
+        let (summary, sessions, turns) = by_agent.entry(e.agent.as_str()).or_insert_with(|| {
+            (
+                AgentSummary {
+                    agent: e.agent.clone(),
+                    ..AgentSummary::default()
+                },
+                HashSet::new(),
+                HashSet::new(),
+            )
+        });
+        sessions.insert(e.session_id.as_str());
+        if let Some(turn) = &e.turn {
+            turns.insert(turn.as_str());
+        }
+        if let Some(model) = &e.model
+            && !summary.models.contains(model)
+        {
+            summary.models.push(model.clone());
+        }
+        match &e.kind {
+            EventKind::Edit { .. } => summary.edits += 1,
+            EventKind::Command { classification, .. } if classification.verifies() => {
+                summary.runs += 1;
+            }
+            EventKind::Assumption { .. } => summary.assumptions += 1,
+            _ => {}
+        }
+    }
+    by_agent
+        .into_values()
+        .map(|(mut summary, sessions, turns)| {
+            summary.sessions = sessions.len();
+            summary.turns = turns.len();
+            summary
+        })
+        .collect()
 }
 
 impl Report {
@@ -266,154 +436,91 @@ impl Report {
         serde_json::to_string_pretty(self)
     }
 
-    pub fn to_markdown(&self) -> String {
-        let mut out = String::new();
-        let s = &self.summary;
-        // Writing to a String cannot fail; ignore the fmt::Result.
-        let _ = writeln!(out, "{REPORT_MARKER}");
-        let _ = writeln!(out, "### Witness review plan");
-        let _ = writeln!(out);
-        let sections = plural(s.sections, "section", "sections");
-        if s.sections == 0 {
-            let _ = writeln!(
-                out,
-                "**No agent-written sections in `{}...{}`.**",
-                code(&self.base),
-                code(&self.head)
-            );
-        } else if s.review_closely == 0 {
-            let _ = writeln!(
-                out,
-                "**Review 0 of {} {sections} closely: nothing failed, was guessed or went unchecked.**",
-                s.sections
-            );
-        } else if s.review_closely == s.sections {
-            let _ = writeln!(
-                out,
-                "**Review {} of {} {sections} closely.**",
-                s.review_closely, s.sections
-            );
-        } else {
-            let _ = writeln!(
-                out,
-                "**Review {} of {} {sections} closely, skim the rest.**",
-                s.review_closely, s.sections
-            );
-        }
+    /// Every section, close-review ones first.
+    pub fn sections(&self) -> impl Iterator<Item = &Section> {
+        self.flagged.iter().chain(&self.over_cap).chain(&self.skim)
+    }
 
-        if !self.flagged.is_empty() {
-            let _ = writeln!(out);
-            let _ = writeln!(out, "| File | Lines | Status | Why |");
-            let _ = writeln!(out, "| --- | --- | --- | --- |");
-            for sec in &self.flagged {
-                let _ = writeln!(
-                    out,
-                    "| `{}` | {} | {} | {} |",
-                    code(&sec.file),
-                    sec.lines,
-                    sec.status.as_str(),
-                    cell(&why(sec))
-                );
+    /// Sections for close review, including those over the cap.
+    pub fn close_review(&self) -> impl Iterator<Item = &Section> {
+        self.flagged.iter().chain(&self.over_cap)
+    }
+
+    /// Path of a section's file relative to the repository root.
+    pub fn repo_path(&self, file: &str) -> String {
+        format!("{}{file}", self.prefix)
+    }
+
+    /// Fills in each section's link to its lines at head.
+    pub fn set_links(&mut self, links: &Links) {
+        let prefix = self.prefix.clone();
+        for section in self
+            .flagged
+            .iter_mut()
+            .chain(self.over_cap.iter_mut())
+            .chain(self.skim.iter_mut())
+        {
+            section.url = Some(links.url(&prefix, section));
+        }
+        self.head_sha = Some(links.sha.clone());
+    }
+
+    /// Whether any section has one of `statuses` or `signals`.
+    pub fn has_any(&self, statuses: &[Status], signals: &[SignalKind]) -> bool {
+        self.sections().any(|s| {
+            statuses.contains(&s.status) || s.signals.iter().any(|g| signals.contains(&g.kind))
+        })
+    }
+}
+
+/// How to link to a file's lines on the code host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Links {
+    pub style: LinkStyle,
+    /// e.g. `https://github.com/acme/app`.
+    pub base: String,
+    /// Commit to link to.
+    pub sha: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkStyle {
+    GitHub,
+    GitLab,
+}
+
+impl Links {
+    /// Link to a section's lines.
+    pub fn url(&self, prefix: &str, section: &Section) -> String {
+        let base = self.base.trim_end_matches('/');
+        let path = format!("{prefix}{}", section.file)
+            .split('/')
+            .map(encode_path_segment)
+            .collect::<Vec<_>>()
+            .join("/");
+        let anchor = match (section.start, section.end, self.style) {
+            (Some(a), Some(b), LinkStyle::GitHub) if a != b => format!("#L{a}-L{b}"),
+            (Some(a), Some(b), LinkStyle::GitLab) if a != b => format!("#L{a}-{b}"),
+            (Some(a), _, _) => format!("#L{a}"),
+            _ => String::new(),
+        };
+        match self.style {
+            LinkStyle::GitHub => format!("{base}/blob/{}/{path}{anchor}", self.sha),
+            LinkStyle::GitLab => format!("{base}/-/blob/{}/{path}{anchor}", self.sha),
+        }
+    }
+}
+
+fn encode_path_segment(segment: &str) -> String {
+    segment
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
             }
-        }
-
-        if !self.over_cap.is_empty() {
-            let _ = writeln!(out);
-            let _ = writeln!(out, "<details>");
-            let _ = writeln!(
-                out,
-                "<summary>{} more {} to review closely (over the cap of {})</summary>",
-                self.over_cap.len(),
-                plural(self.over_cap.len(), "section", "sections"),
-                self.flagged.len()
-            );
-            let _ = writeln!(out);
-            write_list(&mut out, &self.over_cap);
-            let _ = writeln!(out, "</details>");
-        }
-
-        if !self.skim.is_empty() {
-            let _ = writeln!(out);
-            let _ = writeln!(out, "<details>");
-            let _ = writeln!(
-                out,
-                "<summary>{} {} to skim</summary>",
-                self.skim.len(),
-                plural(self.skim.len(), "section", "sections")
-            );
-            let _ = writeln!(out);
-            write_list(&mut out, &self.skim);
-            let _ = writeln!(out, "</details>");
-        }
-
-        let _ = writeln!(out);
-        let mut notes = vec![format!("Track record: {}", self.track_record.message)];
-        if s.human > 0 {
-            notes.push(format!(
-                "{} human-written {} not counted",
-                s.human,
-                plural(s.human, "section", "sections")
-            ));
-        }
-        notes.push(format!(
-            "{} agent {}",
-            s.sessions,
-            plural(s.sessions, "session", "sessions")
-        ));
-        if s.skipped_lines > 0 {
-            notes.push(format!(
-                "{} unreadable log {} skipped",
-                s.skipped_lines,
-                plural(s.skipped_lines, "line", "lines")
-            ));
-        }
-        let _ = writeln!(out, "<sub>{}.</sub>", notes.join(" · "));
-        out
-    }
-}
-
-/// The reason, with signal details appended.
-fn why(sec: &Section) -> String {
-    if sec.signals.is_empty() {
-        return sec.reason.clone();
-    }
-    let details: Vec<&str> = sec.signals.iter().map(|s| s.detail.as_str()).collect();
-    format!("{} ({})", sec.reason, details.join("; "))
-}
-
-fn write_list(out: &mut String, sections: &[Section]) {
-    for sec in sections {
-        let _ = writeln!(
-            out,
-            "- `{}` {}: {}, {}",
-            code(&sec.file),
-            sec.lines,
-            sec.status.as_str(),
-            lowercase_first(&why(sec))
-        );
-    }
-}
-
-fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
-    if n == 1 { one } else { many }
-}
-
-/// Text safe inside a markdown code span.
-fn code(text: &str) -> String {
-    text.replace('`', "'").replace('|', "\\|")
-}
-
-/// Text safe inside a markdown table cell.
-fn cell(text: &str) -> String {
-    text.replace('|', "\\|").replace(['\n', '\r'], " ")
-}
-
-fn lowercase_first(text: &str) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => first.to_lowercase().chain(chars).collect(),
-        None => String::new(),
-    }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -421,7 +528,7 @@ mod tests {
     use super::*;
     use crate::classify::DefaultRules;
     use crate::history::NullHistoryStore;
-    use crate::record::{Change, CommandClass, EventKind, LineRange};
+    use crate::record::{Change, LineRange};
     use crate::scope::NoPackages;
     use time::Duration;
     use time::macros::datetime;
@@ -512,6 +619,7 @@ mod tests {
         build(ReportInput {
             base: "main",
             head: "HEAD",
+            prefix: "",
             hunks: &hunks,
             sessions,
             skipped_lines: 0,
@@ -595,11 +703,107 @@ mod tests {
     }
 
     #[test]
+    fn links_point_at_lines_on_the_host() {
+        let mut report = sample(10);
+        report.prefix = "pkg/".into();
+        report.set_links(&Links {
+            style: LinkStyle::GitHub,
+            base: "https://github.com/acme/app".into(),
+            sha: "abc123".into(),
+        });
+        let a = report.skim.iter().find(|s| s.file == "src/a.rs").unwrap();
+        assert_eq!(
+            a.url.as_deref(),
+            Some("https://github.com/acme/app/blob/abc123/pkg/src/a.rs#L1-L3")
+        );
+        let md = report.to_markdown();
+        assert!(
+            md.contains("[5](https://github.com/acme/app/blob/abc123/pkg/src/b.rs#L5)"),
+            "{md}"
+        );
+        let gitlab = Links {
+            style: LinkStyle::GitLab,
+            base: "https://gitlab.com/acme/app/".into(),
+            sha: "abc".into(),
+        };
+        assert_eq!(
+            gitlab.url("", a),
+            "https://gitlab.com/acme/app/-/blob/abc/src/a.rs#L1-3"
+        );
+    }
+
+    #[test]
+    fn markdown_has_coverage_runs_and_agents() {
+        let md = sample(10).to_markdown();
+        assert!(
+            md.contains("Agents wrote 7 lines: 43% tested, 14% only compiled, 43% unchecked."),
+            "{md}"
+        );
+        assert!(
+            md.contains("Agent checks: 2 test and build runs, last passed"),
+            "{md}"
+        );
+        assert!(md.contains("| `cargo test` | passed |"), "{md}");
+        assert!(md.contains("<sub>claude-code (1 session)"), "{md}");
+    }
+
+    #[test]
+    fn markdown_fits_the_size_limit() {
+        let mut report = sample(10);
+        let many = report.skim[0].clone();
+        report.skim = (0..5000)
+            .map(|i| Section {
+                file: format!("src/generated/file_{i}.rs"),
+                ..many.clone()
+            })
+            .collect();
+        let md = report.to_markdown_with(MarkdownOptions { max_chars: 20_000 });
+        assert!(md.chars().count() <= 20_000);
+        assert!(md.contains("… and"), "lists are shortened");
+        assert!(md.starts_with(REPORT_MARKER));
+    }
+
+    #[test]
+    fn text_sarif_and_annotations() {
+        let report = sample(10);
+        let text = report.to_text(TextOptions {
+            color: false,
+            all: true,
+        });
+        assert!(text.starts_with("Witness: review 2 of 4 sections closely (main...HEAD)"));
+        assert!(text.contains("GUESSED    src/b.rs:5"), "{text}");
+        assert!(text.contains("To skim:"));
+        assert!(!text.contains('\x1b'));
+
+        let sarif = report.to_sarif("0.2.0");
+        let results = sarif["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["ruleId"], "witness/guessed");
+        assert_eq!(results[0]["level"], "warning");
+        assert_eq!(
+            results[0]["locations"][0]["physicalLocation"]["region"]["startLine"],
+            5
+        );
+
+        let annotations = report.to_github_annotations();
+        let first = annotations.lines().next().unwrap();
+        assert!(
+            first
+                .starts_with("::warning file=src/b.rs,line=5,endLine=5,title=Witness%3A guessed::"),
+            "{first}"
+        );
+        let gitlab = report.to_gitlab_codequality();
+        assert_eq!(gitlab[0]["location"]["path"], "src/b.rs");
+        assert_eq!(gitlab[0]["severity"], "major");
+    }
+
+    #[test]
     fn empty_change() {
         let config = Config::default();
         let report = build(ReportInput {
             base: "main",
             head: "HEAD",
+            prefix: "",
             hunks: &[],
             sessions: Vec::new(),
             skipped_lines: 0,

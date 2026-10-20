@@ -41,6 +41,13 @@ pub enum Command {
     Record(RecordArgs),
     /// Print the review plan for base...head.
     Report(ReportArgs),
+    /// Show the review plan for this branch including uncommitted work:
+    /// what is failing, guessed or unchecked right now.
+    Status(StatusArgs),
+    /// Show who wrote a line and what checked it: witness explain src/a.rs:42
+    Explain(ExplainArgs),
+    /// List the agent sessions recorded on this branch.
+    Sessions(SessionsArgs),
     /// Post the review plan to a code review platform.
     Post(PostArgs),
 }
@@ -158,26 +165,87 @@ pub enum RecordWhat {
 
 #[derive(Debug, Clone, Args)]
 pub struct RangeArgs {
-    /// Base ref the change will merge into.
-    #[arg(long, default_value = "main")]
-    pub base: String,
+    /// Base ref the change will merge into. Defaults to the CI target
+    /// branch, else origin's default branch, else main or master.
+    #[arg(long)]
+    pub base: Option<String>,
     /// Head ref of the change.
     #[arg(long, default_value = "HEAD")]
     pub head: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct OutputArgs {
+    /// Output format. `auto` is text in a terminal, markdown otherwise.
+    #[arg(long, value_enum, default_value_t = Format::Auto)]
+    pub format: Format,
+    /// In text output, list the sections to skim too.
+    #[arg(long)]
+    pub all: bool,
+    /// Color in text output.
+    #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
+    pub color: ColorArg,
+    /// Exit with status 1 if any section has one of these statuses or
+    /// signals, e.g. --fail-on failing,test-changed-after-failure.
+    #[arg(long, value_delimiter = ',')]
+    pub fail_on: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct ReportArgs {
     #[command(flatten)]
     pub range: RangeArgs,
-    #[arg(long, value_enum, default_value_t = Format::Markdown)]
-    pub format: Format,
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// Base ref (see `witness report --help`).
+    #[arg(long)]
+    pub base: Option<String>,
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ExplainArgs {
+    /// File, optionally with a line: src/parse.rs:42.
+    pub target: String,
+    /// Base ref (see `witness report --help`).
+    #[arg(long)]
+    pub base: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionsArgs {
+    /// Base ref (see `witness report --help`).
+    #[arg(long)]
+    pub base: Option<String>,
+    /// Print JSON instead of a table.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
+    Auto,
     Markdown,
     Json,
+    Text,
+    /// SARIF 2.1.0, for code scanning.
+    Sarif,
+    /// GitHub Actions annotations (workflow commands).
+    Github,
+    /// GitLab Code Quality report.
+    GitlabCodequality,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ColorArg {
+    Auto,
+    Always,
+    Never,
 }
 
 #[derive(Debug, Args)]
@@ -186,6 +254,10 @@ pub struct PostArgs {
     pub platform: PlatformArg,
     #[command(flatten)]
     pub range: RangeArgs,
+    /// Exit with status 1 if any section has one of these statuses or
+    /// signals (see `witness report --help`).
+    #[arg(long, value_delimiter = ',')]
+    pub fail_on: Vec<String>,
     /// owner/repo (GitHub) or project path (GitLab).
     #[arg(long)]
     pub repo: Option<String>,

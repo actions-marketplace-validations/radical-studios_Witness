@@ -493,3 +493,122 @@ fn tests_changed_after_failing_are_escalated() {
     let md = repo.report_markdown("main", "HEAD");
     assert!(md.contains("changed after `cargo test` failed"), "{md}");
 }
+
+/// `witness status` reports on uncommitted work too, and says when session
+/// logs aren't committed yet.
+#[test]
+fn status_covers_uncommitted_work() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", LIB);
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    let agent = repo.claude("s");
+    agent.read("src/lib.rs");
+    agent.edit("src/lib.rs", "    2\n", "    compute_beta_value()\n");
+    agent.create("src/new.rs", "pub fn brand_new_function() {}\n");
+
+    // Nothing committed: base is found on its own, and both files show.
+    let out = repo.witness(&["status", "--format", "text", "--all"], None);
+    let text = support::stdout_of(&out);
+    assert!(
+        text.starts_with("Witness: review 2 of 2 sections closely (main...working tree)"),
+        "{text}"
+    );
+    assert!(text.contains("src/new.rs:1"), "{text}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("1 session log is not committed yet"),
+        "{stderr}"
+    );
+
+    // --fail-on turns findings into an exit code.
+    let failed = repo.witness(
+        &["status", "--format", "json", "--fail-on", "unverified"],
+        None,
+    );
+    assert_eq!(failed.status.code(), Some(1));
+    let passed = repo.witness(
+        &["status", "--format", "json", "--fail-on", "failing"],
+        None,
+    );
+    assert_eq!(passed.status.code(), Some(0));
+    let bad = repo.witness(&["status", "--fail-on", "sloppy"], None);
+    assert!(!bad.status.success());
+}
+
+#[test]
+fn explain_and_sessions() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", LIB);
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    let agent = repo.claude("sess-42");
+    agent.read("src/lib.rs");
+    agent.edit("src/lib.rs", "    2\n", "    compute_beta_value()\n");
+    agent.bash("cargo test -p other");
+    agent.bash_fail("cargo test", 101);
+    repo.commit_all("feature");
+
+    let text = support::stdout_of(&repo.witness(&["explain", "src/lib.rs:6"], None));
+    assert!(
+        text.starts_with("src/lib.rs:6: failing (lines 6)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("claude-code in session sess-42: edited with Edit (located in the file)"),
+        "{text}"
+    );
+    assert!(text.contains("`cargo test` failed"), "{text}");
+    let human = support::stdout_of(&repo.witness(&["explain", "src/lib.rs:1"], None));
+    assert!(human.contains("not changed on this branch"), "{human}");
+
+    let table = support::stdout_of(&repo.witness(&["sessions"], None));
+    assert!(table.contains("sess-42"), "{table}");
+    let json: serde_json::Value = serde_json::from_str(&support::stdout_of(
+        &repo.witness(&["sessions", "--json"], None),
+    ))
+    .unwrap();
+    assert_eq!(json[0]["edits"], 1);
+    assert_eq!(json[0]["checks"], 2);
+    assert_eq!(json[0]["checks_failed"], 1);
+}
+
+#[test]
+fn ci_output_formats() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", LIB);
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.git(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
+    let agent = repo.claude("s");
+    agent.read("src/lib.rs");
+    agent.edit("src/lib.rs", "    2\n", "    compute_beta_value()\n");
+    repo.commit_all("feature");
+
+    let report =
+        |format: &str| support::stdout_of(&repo.witness(&["report", "--format", format], None));
+    let md = report("markdown");
+    let sha = repo.git(&["rev-parse", "HEAD"]);
+    let link = format!(
+        "https://github.com/acme/app/blob/{}/src/lib.rs#L6",
+        sha.trim()
+    );
+    assert!(md.contains(&link), "{md}");
+    let annotations = report("github");
+    assert!(
+        annotations.starts_with(
+            "::warning file=src/lib.rs,line=6,endLine=6,title=Witness%3A unverified::"
+        ),
+        "{annotations}"
+    );
+    let sarif: serde_json::Value = serde_json::from_str(&report("sarif")).unwrap();
+    assert_eq!(
+        sarif["runs"][0]["results"][0]["ruleId"],
+        "witness/unverified"
+    );
+    let gitlab: serde_json::Value = serde_json::from_str(&report("gitlab-codequality")).unwrap();
+    assert_eq!(gitlab[0]["location"]["lines"]["begin"], 6);
+}

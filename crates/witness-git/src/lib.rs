@@ -68,6 +68,15 @@ pub trait Git {
     fn commit_text(&self, _sha: &str) -> Result<Option<String>, GitError> {
         Ok(None)
     }
+    /// The short name a symbolic ref points to, e.g. `origin/main` for
+    /// `refs/remotes/origin/HEAD`.
+    fn symbolic_ref(&self, _name: &str) -> Result<Option<String>, GitError> {
+        Ok(None)
+    }
+    /// The URL of a remote.
+    fn remote_url(&self, _remote: &str) -> Result<Option<String>, GitError> {
+        Ok(None)
+    }
 }
 
 /// Hunks changed on `head` since its merge base with `base`.
@@ -163,6 +172,17 @@ impl GitCli {
             .run_with_index(&["write-tree"], Some(index))?
             .trim()
             .to_owned())
+    }
+
+    /// `git status --porcelain` for `path`: one line per changed file.
+    pub fn status_porcelain(&self, path: &str) -> Result<String, GitError> {
+        self.run(&["status", "--porcelain", "--", path])
+    }
+
+    /// Whether this is a shallow clone (history cut off).
+    pub fn is_shallow(&self) -> bool {
+        self.run(&["rev-parse", "--is-shallow-repository"])
+            .is_ok_and(|out| out.trim() == "true")
     }
 
     /// Raw `git diff -U0` between two trees, with paths relative to this
@@ -277,6 +297,24 @@ impl Git for GitCli {
         let lines = format!("{},{}", range.start, range.end);
         let out = self.run(&["blame", "--porcelain", "-L", &lines, rev, "--", path])?;
         Ok(parse_blame_porcelain(&out))
+    }
+
+    fn symbolic_ref(&self, name: &str) -> Result<Option<String>, GitError> {
+        let out = self.output(&["symbolic-ref", "--quiet", "--short", name])?;
+        Ok(out
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .filter(|s| !s.is_empty()))
+    }
+
+    fn remote_url(&self, remote: &str) -> Result<Option<String>, GitError> {
+        let out = self.output(&["remote", "get-url", remote])?;
+        Ok(out
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .filter(|s| !s.is_empty()))
     }
 
     fn commit_text(&self, sha: &str) -> Result<Option<String>, GitError> {

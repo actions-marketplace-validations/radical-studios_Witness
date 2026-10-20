@@ -54,8 +54,9 @@ git switch -c my-feature
 
 claude                            # work with the agent as usual
 
+witness status                    # what's unchecked so far
 git add -A && git commit -m "Feature"   # include .witness/sessions/
-witness report --base main --head HEAD
+witness report                    # the plan reviewers get
 ```
 
 Example output:
@@ -80,14 +81,29 @@ Example output:
 
 Other commands:
 
-- `witness report --format json` prints the same data as JSON.
-- `witness assume --file src/x.rs --lines 10-20 "the API returns UTC"` records
-  an assumption (the agent runs this; the skill tells it when).
+- `witness status` shows the plan for your branch including uncommitted
+  work, in the terminal: what is failing, guessed or unchecked right now.
+- `witness explain src/parse.rs:42` shows who wrote a line, how, and which
+  checks ran after it.
+- `witness sessions` lists the agent sessions recorded on the branch.
+- `witness report --format json|text|sarif|github|gitlab-codequality`
+  prints the same data for tools: SARIF for code scanning, `github` for
+  inline annotations in GitHub Actions, `gitlab-codequality` for GitLab's
+  merge request widget.
+- `--fail-on failing,test-changed-after-failure` makes `report`, `status`
+  and `post` exit 1 when a section has one of those statuses or signals,
+  for CI gates.
+- `witness assume --file src/x.rs --lines 10-20 "the API returns UTC"`
+  records an assumption (the agent runs this; the skill tells it when).
 - `witness post --platform dry-run` prints what would be posted.
 - `witness init --here` sets Witness up for one directory (e.g. a package in
   a monorepo) instead of the whole repository.
 - `WITNESS_DEBUG=1` makes the hooks log their timings to
   `.witness/state/hook.log`, where errors are always logged.
+
+The base branch defaults to the CI target branch, else origin's default
+branch, else `main` or `master`; pass `--base` to choose. Report links
+point at the head commit on GitHub or GitLab when the remote is on one.
 
 ## How sections are classified
 

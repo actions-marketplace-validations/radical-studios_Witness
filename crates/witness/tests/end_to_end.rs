@@ -67,7 +67,7 @@ fn report_after_a_recorded_session() {
     );
 
     let markdown = repo.report_markdown("main", "HEAD");
-    insta::assert_snapshot!("report_markdown", markdown);
+    insta::assert_snapshot!("report_markdown", mask_run_times(&markdown));
 
     let report = repo.report_json("main", "HEAD");
     assert_eq!(report["summary"]["sections"], 3);
@@ -106,4 +106,29 @@ fn hook_never_fails() {
     let out = witness(repo, &["hook", "post-tool-use"], Some(&json));
     assert!(out.status.success());
     assert!(!repo.join(".witness").exists());
+}
+
+/// Replaces the clock times in the agent checks table (`| 10-20 05:35 |`).
+fn mask_run_times(markdown: &str) -> String {
+    markdown
+        .lines()
+        .map(|line| {
+            let time = line.get(2..13);
+            let is_time = time.is_some_and(|t| {
+                t.len() == 11
+                    && t.bytes().enumerate().all(|(i, b)| match i {
+                        2 => b == b'-',
+                        5 => b == b' ',
+                        8 => b == b':',
+                        _ => b.is_ascii_digit(),
+                    })
+            });
+            if line.starts_with("| ") && is_time {
+                format!("| <time>{}", &line[13..])
+            } else {
+                line.to_owned()
+            }
+        })
+        .map(|l| l + "\n")
+        .collect()
 }

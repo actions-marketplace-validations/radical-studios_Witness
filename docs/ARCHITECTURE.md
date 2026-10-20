@@ -149,23 +149,29 @@ See [RECORD_FORMAT.md](RECORD_FORMAT.md) for the records.
 
 **Review 2 of 9 sections closely, skim the rest.**
 
+Agents wrote 412 lines: 61% tested, 9% only compiled, 30% unchecked.
+
 | File | Lines | Status | Why |
 | --- | --- | --- | --- |
-| `src/parse.rs` | 12–18 | guessed | Assumed: the upstream API returns timestamps in UTC |
-| `src/cli.rs` | 40–41 | unverified | Edited by claude-code; no test or build ran after the last edit |
+| `src/parse.rs` | [12-18](https://github.com/o/r/blob/<sha>/src/parse.rs#L12-L18) | failing | `cargo test` failed (exit 101; 1 failed) after the last edit |
+| `tests/parse.rs` | [40-41](…) | tested | `cargo test` passed after the last edit (142 passed)<br><sub>⚑ changed after `cargo test` failed</sub> |
 
-<details>
-<summary>7 sections to skim</summary>
+<details><summary>7 sections to skim</summary> … </details>
+<details><summary>Agent checks: 6 test and build runs, last passed</summary> … </details>
 
-- `src/lib.rs` 3–9: checked, `cargo test` passed after the last edit
-</details>
-
-Track record: No track record yet.
+<sub>claude-code (2 sessions, claude-opus-5-5) · 1 human-written section not counted · Track record: …</sub>
 ```
 
-When every agent-written section is flagged, the header drops "skim the
-rest". The first line is a hidden marker so platform adapters can find and update
-their previous comment instead of adding a new one.
+When every agent-written section is for close review, the header drops
+"skim the rest". The first line is a hidden marker so platform adapters can
+find and update their previous comment instead of adding a new one. Lists
+are shortened, then dropped, to keep the comment under GitHub's 65,536
+character limit.
+
+Other renderings of the same `Report`: `text` (terminal, `witness status`),
+`json`, `sarif` (2.1.0; one result per close-review section, fingerprinted
+by content), `github` (workflow-command annotations) and
+`gitlab-codequality`.
 
 ## Platforms
 

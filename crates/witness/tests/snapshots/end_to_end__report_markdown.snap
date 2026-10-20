@@ -1,11 +1,13 @@
 ---
 source: crates/witness/tests/end_to_end.rs
-expression: markdown
+expression: mask_run_times(&markdown)
 ---
 <!-- witness:report -->
 ### Witness review plan
 
 **Review 2 of 3 sections closely, skim the rest.**
+
+Agents wrote 6 lines: 17% tested, 83% unchecked.
 
 | File | Lines | Status | Why |
 | --- | --- | --- | --- |
@@ -18,4 +20,13 @@ expression: markdown
 - `src/lib.rs` 2: tested, `cargo test` passed after the last edit
 </details>
 
-<sub>Track record: No track record yet. · 1 human-written section not counted · 1 agent session.</sub>
+<details>
+<summary>Agent checks: 2 test and build runs, last passed</summary>
+
+| When (UTC) | Command | Result |
+| --- | --- | --- |
+| <time> | `cargo test` | passed |
+| <time> | `cargo test 2>&1 \| tail -20` | unknown |
+</details>
+
+<sub>claude-code (1 session) · 1 human-written section not counted · Track record: No track record yet.</sub>

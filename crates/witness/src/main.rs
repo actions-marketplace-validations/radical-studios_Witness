@@ -8,6 +8,7 @@ mod hooks;
 mod init;
 mod pipeline;
 mod record;
+mod review;
 mod snapshot;
 mod workspace;
 
@@ -34,7 +35,7 @@ fn main() -> ExitCode {
         });
     }
     match run(cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("witness: {err:#}");
             ExitCode::FAILURE
@@ -42,19 +43,23 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+fn run(cli: Cli) -> Result<ExitCode> {
+    let ok = |r: Result<()>| r.map(|()| ExitCode::SUCCESS);
     match cli.command {
-        Command::Init(args) => init::run(args),
+        Command::Init(args) => ok(init::run(args)),
         Command::Hook { agent, event } => {
             hook::run(agent.as_deref(), &event);
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
-        Command::Assume(args) => assume::run(args),
-        Command::Exec(_) => unreachable_exec(),
-        Command::Record(args) => record::run(args),
-        Command::Hooks(args) => hooks::run(args),
-        Command::Report(args) => pipeline::run_report(args),
-        Command::Post(args) => pipeline::run_post(args),
+        Command::Assume(args) => ok(assume::run(args)),
+        Command::Exec(_) => ok(unreachable_exec()),
+        Command::Record(args) => ok(record::run(args)),
+        Command::Hooks(args) => ok(hooks::run(args)),
+        Command::Report(args) => review::run_report(args),
+        Command::Status(args) => review::run_status(args),
+        Command::Explain(args) => ok(review::run_explain(args)),
+        Command::Sessions(args) => ok(review::run_sessions(args)),
+        Command::Post(args) => review::run_post(args),
     }
 }
 

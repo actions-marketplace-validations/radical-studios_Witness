@@ -142,7 +142,7 @@ fn under(file: &str, dir: &str) -> bool {
 /// at the root) after `cd`-ing through `cds`. Returns `None` for a run of
 /// the whole repository.
 pub fn parse(simple: &str, cwd: Option<&str>, cds: &[String]) -> Option<Scope> {
-    let words = shell_words(simple);
+    let words = without_redirects(shell_words(simple));
     let mut scope = Scope {
         cwd: join_cwd(cwd, cds),
         ..Scope::default()
@@ -412,6 +412,30 @@ fn maven(args: &[&str], scope: &mut Scope, rel: &dyn Fn(&str) -> String) {
     }
 }
 
+/// Drops redirections (`2>&1`, `> out.txt`, `<in`) from a word list.
+fn without_redirects(words: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(words.len());
+    let mut skip_target = false;
+    for word in words {
+        if skip_target {
+            skip_target = false;
+            continue;
+        }
+        let rest = word.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+        if let Some(target) = rest
+            .strip_prefix(">>")
+            .or_else(|| rest.strip_prefix('>'))
+            .or_else(|| rest.strip_prefix('<'))
+        {
+            // `>` alone: the target is the next word.
+            skip_target = target.is_empty();
+            continue;
+        }
+        out.push(word);
+    }
+    out
+}
+
 fn value_of<'a>(args: &[&'a str], flags: &[&str]) -> Option<&'a str> {
     args.iter().enumerate().find_map(|(i, a)| {
         if flags.contains(a) {
@@ -497,6 +521,10 @@ mod tests {
                 .filtered
         );
         assert_eq!(scope("cargo build --release"), None);
+        // Redirections are not filters.
+        assert_eq!(scope("cargo test 2>&1"), None);
+        assert_eq!(scope("cargo test > out.txt 2> err.txt"), None);
+        assert!(scope("pytest -q 2>&1 tests/a.py").unwrap().filtered);
     }
 
     #[test]
