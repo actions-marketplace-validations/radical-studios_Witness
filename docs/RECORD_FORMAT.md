@@ -14,7 +14,8 @@ Status: **schema_version 1**. This document is the contract between capture
     ├── sessions/
     │   └── <session-id>.jsonl   # committed with the code
     └── state/                   # local only, never committed
-        └── current-session      # id of the most recent session, for `witness assume`
+        ├── current-session      # id of the most recent session, for `witness assume`
+        └── hook.log             # hook errors (and timings with WITNESS_DEBUG=1)
 ```
 
 `<session-id>` is the agent's session id with every character other than
@@ -23,8 +24,9 @@ Status: **schema_version 1**. This document is the contract between capture
 The repo root is the nearest ancestor of the hook's `cwd` that contains a
 `.witness/` directory. If there is none, capture does nothing: installing the
 plugin globally never writes into repositories that have not run
-`witness init`. In v0 the root must also be the git top level, because diff
-paths are top-level-relative.
+`witness init`. The root is usually the git top level; `witness init --here`
+places it in a subdirectory, and paths in the log are then relative to that
+subdirectory.
 
 ## Lines
 

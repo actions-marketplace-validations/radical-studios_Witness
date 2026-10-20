@@ -59,6 +59,10 @@ pub struct CaptureContext<'a> {
     pub config: &'a Config,
     /// Absolute repo root (the directory containing `.witness/`).
     pub root: &'a Path,
+    /// The root with symlinks resolved, when that differs from `root`. Agents
+    /// may report either form (e.g. `/var/...` and `/private/var/...` on
+    /// macOS), so paths are matched against both.
+    pub canonical_root: Option<&'a Path>,
     pub now: OffsetDateTime,
 }
 
@@ -356,7 +360,8 @@ fn resolve(
         let base = payload.cwd.as_deref().map_or(ctx.root, Path::new);
         normalize(&base.join(path))
     };
-    let rel = relative_to(&abs, &normalize(ctx.root))?;
+    let rel = relative_to(&abs, &normalize(ctx.root))
+        .or_else(|| relative_to(&abs, &normalize(ctx.canonical_root?)))?;
     Some((rel, abs))
 }
 
@@ -401,6 +406,7 @@ mod tests {
         let ctx = CaptureContext {
             config: &config,
             root: Path::new(ROOT),
+            canonical_root: Some(Path::new("/private/home/user/my-project")),
             now: datetime!(2026-10-20 03:37:00 UTC),
         };
         let files: Vec<(PathBuf, String)> = files
@@ -651,6 +657,20 @@ mod tests {
             "/home/user/my-project/../other/x",
         );
         assert!(capture(&json, &[]).is_empty());
+    }
+
+    #[test]
+    fn paths_under_the_canonical_root_resolve() {
+        let json = fixture("post_tool_use_read.json").replace(
+            "/home/user/my-project/src/lib.rs",
+            "/private/home/user/my-project/src/lib.rs",
+        );
+        assert_eq!(
+            capture(&json, &[]),
+            vec![EventKind::Read {
+                file: "src/lib.rs".into()
+            }]
+        );
     }
 
     #[test]

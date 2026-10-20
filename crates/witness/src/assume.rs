@@ -91,7 +91,15 @@ fn repo_path(root: &Path, cwd: &Path, file: &str) -> Result<String> {
     } else {
         normalize(&cwd.join(path))
     };
+    // Either side may spell a symlinked directory differently (e.g.
+    // `/var` and `/private/var` on macOS); fall back to resolved paths.
+    let canonical = |p: &Path| std::fs::canonicalize(p).ok();
     relative_to(&abs, &normalize(root))
+        .or_else(|| relative_to(&canonical(&abs)?, &canonical(root)?))
+        .or_else(|| {
+            let parent = canonical(abs.parent()?)?;
+            relative_to(&parent.join(abs.file_name()?), &canonical(root)?)
+        })
         .ok_or_else(|| anyhow!("{file} is outside the repository at {}", root.display()))
 }
 
@@ -121,5 +129,27 @@ mod tests {
         );
         assert_eq!(repo_path(root, Path::new("/x"), "/r/c.rs").unwrap(), "c.rs");
         assert!(repo_path(root, Path::new("/r"), "../outside").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_spellings_of_the_root_resolve() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        std::fs::write(real.join("src/a.rs"), "").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let via_real = real.join("src/a.rs");
+        assert_eq!(
+            repo_path(&link, &link, via_real.to_str().unwrap()).unwrap(),
+            "src/a.rs"
+        );
+        // A file that doesn't exist yet still resolves through its parent.
+        let new_file = real.join("src/new.rs");
+        assert_eq!(
+            repo_path(&link, &link, new_file.to_str().unwrap()).unwrap(),
+            "src/new.rs"
+        );
     }
 }

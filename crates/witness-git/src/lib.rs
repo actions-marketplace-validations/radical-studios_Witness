@@ -51,6 +51,8 @@ pub trait Git {
     fn toplevel(&self) -> Result<PathBuf, GitError>;
     /// Full commit SHA of `rev`.
     fn rev_parse(&self, rev: &str) -> Result<String, GitError>;
+    /// Best common ancestor of `a` and `b`, or `None` if they share no history.
+    fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>, GitError>;
     /// Raw `git diff -U0 base...head` output.
     fn diff(&self, base: &str, head: &str) -> Result<String, GitError>;
     /// Files under `dir` in `rev`'s tree, repo-relative.
@@ -120,6 +122,22 @@ impl Git for GitCli {
             .run(&["rev-parse", "--verify", "--quiet", &spec])?
             .trim()
             .to_owned())
+    }
+
+    fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>, GitError> {
+        let out = self.output(&["merge-base", a, b])?;
+        // Exit 1 with no output means no common ancestor.
+        if !out.status.success() {
+            if out.status.code() == Some(1) && out.stderr.is_empty() {
+                return Ok(None);
+            }
+            return Err(GitError::Failed {
+                args: format!("merge-base {a} {b}"),
+                status: out.status.to_string(),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            });
+        }
+        Ok(Some(String::from_utf8(out.stdout)?.trim().to_owned()))
     }
 
     fn diff(&self, base: &str, head: &str) -> Result<String, GitError> {

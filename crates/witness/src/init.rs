@@ -5,18 +5,24 @@ use std::fs;
 use anyhow::{Context, Result};
 use witness_git::{Git, GitCli};
 
+use crate::cli::InitArgs;
 use crate::workspace::{CONFIG_FILE, SESSIONS_DIR, WITNESS_DIR};
 
-pub fn run() -> Result<()> {
+pub fn run(args: InitArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("finding the working directory")?;
-    // Diff paths are relative to the git top level, so .witness/ lives there.
-    let root = GitCli::new(&cwd).toplevel().unwrap_or_else(|err| {
-        eprintln!(
-            "witness: not in a git repository ({err}); initializing {}",
-            cwd.display()
-        );
+    // By default .witness/ lives at the git top level; `--here` scopes it to
+    // one directory (reports then cover only changes below it).
+    let root = if args.here {
         cwd.clone()
-    });
+    } else {
+        GitCli::new(&cwd).toplevel().unwrap_or_else(|err| {
+            eprintln!(
+                "witness: not in a git repository ({err}); initializing {}",
+                cwd.display()
+            );
+            cwd.clone()
+        })
+    };
 
     let sessions = root.join(SESSIONS_DIR);
     fs::create_dir_all(&sessions).with_context(|| format!("creating {}", sessions.display()))?;

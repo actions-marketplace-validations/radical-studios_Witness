@@ -12,6 +12,9 @@ pub const WITNESS_DIR: &str = ".witness";
 pub const SESSIONS_DIR: &str = ".witness/sessions";
 pub const CONFIG_FILE: &str = "witness.toml";
 const CURRENT_SESSION: &str = ".witness/state/current-session";
+const HOOK_LOG: &str = ".witness/state/hook.log";
+/// The hook log is trimmed to its newest half once it grows past this.
+const HOOK_LOG_MAX_BYTES: u64 = 64 * 1024;
 
 /// Nearest ancestor of `start` (inclusive) that contains `.witness/`.
 pub fn find_root(start: &Path) -> Option<PathBuf> {
@@ -19,6 +22,28 @@ pub fn find_root(start: &Path) -> Option<PathBuf> {
         .ancestors()
         .find(|dir| dir.join(WITNESS_DIR).is_dir())
         .map(Path::to_path_buf)
+}
+
+/// The directory whose `.witness/` applies to `cwd`, and its path relative
+/// to the git top level (empty, or `/`-terminated). Falls back to the top
+/// level when no `.witness/` sits at or below it.
+pub fn witness_root(cwd: &Path, toplevel: &Path) -> (PathBuf, String) {
+    let canonical = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if let Some(root) = find_root(cwd)
+        && let Ok(rel) = canonical(&root).strip_prefix(canonical(toplevel))
+    {
+        let parts: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let prefix = if parts.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", parts.join("/"))
+        };
+        return (root, prefix);
+    }
+    (toplevel.to_path_buf(), String::new())
 }
 
 /// Loads `witness.toml` from `root`, or defaults if it is missing.
@@ -52,6 +77,33 @@ pub fn append_events(root: &Path, events: &[Event]) -> Result<()> {
     file.write_all(buf.as_bytes())
         .with_context(|| format!("appending to {}", path.display()))?;
     Ok(())
+}
+
+/// Appends a line to the local hook log (`.witness/state/hook.log`), which
+/// `witness doctor` reads. Never fails: the hook must not.
+pub fn log_hook(root: &Path, message: &str) {
+    let path = root.join(HOOK_LOG);
+    let _ = (|| -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if fs::metadata(&path).is_ok_and(|m| m.len() > HOOK_LOG_MAX_BYTES) {
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            let half = text.len() / 2;
+            let keep = text[half..]
+                .find('\n')
+                .map_or("", |i| &text[half + i + 1..]);
+            fs::write(&path, keep)?;
+        }
+        let stamp = time::OffsetDateTime::now_utc();
+        let stamp = witness_core::record::timestamp::format(&stamp).unwrap_or_default();
+        let line = format!("{stamp} {}\n", message.replace('\n', " "));
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?
+            .write_all(line.as_bytes())
+    })();
 }
 
 /// The session `witness assume` records into by default: `session\tagent`.
@@ -96,6 +148,34 @@ mod tests {
             find_root(&tmp.path().join("a/b")).as_deref(),
             Some(tmp.path())
         );
+    }
+
+    #[test]
+    fn witness_root_is_relative_to_toplevel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let top = tmp.path();
+        fs::create_dir_all(top.join("pkg/app/.witness")).unwrap();
+        fs::create_dir_all(top.join("pkg/app/src")).unwrap();
+        let (root, prefix) = witness_root(&top.join("pkg/app/src"), top);
+        assert_eq!(root, top.join("pkg/app"));
+        assert_eq!(prefix, "pkg/app/");
+
+        let other = tempfile::tempdir().unwrap();
+        let (root, prefix) = witness_root(other.path(), other.path());
+        assert_eq!(root, other.path());
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn hook_log_stays_bounded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let line = "x".repeat(1000);
+        for _ in 0..200 {
+            log_hook(tmp.path(), &line);
+        }
+        let text = fs::read_to_string(tmp.path().join(HOOK_LOG)).unwrap();
+        assert!(text.len() as u64 <= HOOK_LOG_MAX_BYTES + 2000);
+        assert!(text.lines().all(|l| l.ends_with(&line)));
     }
 
     #[test]

@@ -73,6 +73,10 @@ Other commands:
 - `witness assume --file src/x.rs --lines 10-20 "the API returns UTC"` records
   an assumption (the agent runs this; the skill tells it when).
 - `witness post --platform dry-run` prints what would be posted.
+- `witness init --here` sets Witness up for one directory (e.g. a package in
+  a monorepo) instead of the whole repository.
+- `WITNESS_DEBUG=1` makes the hooks log their timings to
+  `.witness/state/hook.log`, where errors are always logged.
 
 ## How sections are classified
 
@@ -112,6 +116,7 @@ Commit `.witness/sessions/` along with your changes.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo deny check            # licenses and advisories (cargo install cargo-deny)
 ```
 
 ## License

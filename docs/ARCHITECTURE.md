@@ -57,7 +57,10 @@ there means exit 0. Failed commands arrive as `PostToolUseFailure`, whose
    `.witness/state/current-session`.
 
 It always exits 0. Internal errors (including panics and argument errors) are
-logged to stderr, which Claude Code doesn't show to the model on exit 0. Exit
+logged to stderr, which Claude Code doesn't show to the model on exit 0, and,
+once the repo is known, to the local `.witness/state/hook.log` (bounded to
+64 KiB). With `WITNESS_DEBUG=1`, every hook call also logs its duration
+there. Exit
 code 2 would block the agent's tool call, so it is never used. There is no
 network and no `git` call on this path; the cost is one process start, a
 TOML parse and a file append.
@@ -79,7 +82,10 @@ See [RECORD_FORMAT.md](RECORD_FORMAT.md) for the records.
 2. **Session logs.** Every `.witness/sessions/*.jsonl` in the head commit's
    tree. When `head` resolves to the checked-out `HEAD`, the working-tree
    copy of each log is used instead (it is a superset, since logs are
-   append-only), so a report works before the logs are committed.
+   append-only), so a report works before the logs are committed. Only the
+   lines each log gained since the merge base of `base` and `head` are
+   used: events that were already in the base belong to earlier changes
+   and must not match this one's hunks.
 3. **Replay.** Events are sorted (timestamp, session, position). Edits and
    assumptions with ranges are kept as live spans per file; each later edit
    with a known `change` shifts the spans below it by `added - removed`.
@@ -202,5 +208,8 @@ class wins (`test` > `build` > `lint` > `other`).
   so such runs never count as checks (unless the line starts with
   `set -o pipefail`). Agents pipe test output often; the skill asks them not
   to. A later version could read the test runner's summary line instead.
-- **One repo root.** `.witness/` must be at the git top level.
+- **Nested roots.** `.witness/` usually sits at the git top level.
+  `witness init --here` puts it in a subdirectory instead (one package of a
+  monorepo); reports run from inside it cover only changes below it, with
+  paths relative to it.
 - **Redaction is pattern-based** and can miss secrets with unusual shapes.

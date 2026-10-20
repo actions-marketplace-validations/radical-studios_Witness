@@ -33,7 +33,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Init => init::run(),
+        Command::Init(args) => init::run(args),
         Command::Hook { event } => {
             hook::run(&event);
             Ok(())

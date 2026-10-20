@@ -6,6 +6,7 @@
 
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -30,14 +31,39 @@ pub fn main_guarded() {
     }
 }
 
-/// Runs the hook, logging any error to stderr.
+/// Runs the hook. Errors go to stderr and, once the repo is known, to the
+/// local hook log; with `WITNESS_DEBUG` set, timings are logged too.
 pub fn run(event: &str) {
-    if let Err(err) = try_run(event) {
-        eprintln!("witness hook {event}: {err:#}");
+    let started = Instant::now();
+    let (root, payload) = match read_payload(event) {
+        Ok(Some(found)) => found,
+        // Repositories that never ran `witness init` are left alone.
+        Ok(None) => return,
+        Err(err) => {
+            eprintln!("witness hook {event}: {err:#}");
+            return;
+        }
+    };
+    match record(&root, &payload) {
+        Err(err) => {
+            eprintln!("witness hook {event}: {err:#}");
+            workspace::log_hook(&root, &format!("{event}: error: {err:#}"));
+        }
+        Ok(()) if debug_enabled() => {
+            let tool = payload.tool_name.as_deref().unwrap_or("-");
+            let ms = started.elapsed().as_millis();
+            workspace::log_hook(&root, &format!("{event} {tool}: ok in {ms} ms"));
+        }
+        Ok(()) => {}
     }
 }
 
-fn try_run(event: &str) -> Result<()> {
+fn debug_enabled() -> bool {
+    std::env::var("WITNESS_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Reads the payload from stdin and finds the repo it belongs to.
+fn read_payload(event: &str) -> Result<Option<(PathBuf, HookPayload)>> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
         bail!("expected a hook payload on stdin");
@@ -61,11 +87,7 @@ fn try_run(event: &str) -> Result<()> {
         .or_else(|| std::env::var_os("CLAUDE_PROJECT_DIR").map(PathBuf::from))
         .map_or_else(std::env::current_dir, Ok)
         .context("finding the working directory")?;
-    // Repositories that never ran `witness init` are left alone.
-    let Some(root) = workspace::find_root(&cwd) else {
-        return Ok(());
-    };
-    record(&root, &payload)
+    Ok(workspace::find_root(&cwd).map(|root| (root, payload)))
 }
 
 fn record(root: &Path, payload: &HookPayload) -> Result<()> {
@@ -73,9 +95,11 @@ fn record(root: &Path, payload: &HookPayload) -> Result<()> {
         eprintln!("witness hook: {err:#}; using default config");
         witness_core::Config::default()
     });
+    let canonical = std::fs::canonicalize(root).ok().filter(|c| c != root);
     let ctx = CaptureContext {
         config: &config,
         root,
+        canonical_root: canonical.as_deref(),
         now: OffsetDateTime::now_utc(),
     };
     let read_file = |path: &Path| std::fs::read_to_string(path).ok();

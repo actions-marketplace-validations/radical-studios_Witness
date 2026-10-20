@@ -16,7 +16,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Write a default witness.toml and create .witness/ at the repo root.
-    Init,
+    Init(InitArgs),
     /// Read a Claude Code hook payload from stdin and append to the session log.
     /// Always exits 0.
     Hook {
@@ -30,6 +30,14 @@ pub enum Command {
     Report(ReportArgs),
     /// Post the review plan to a code review platform.
     Post(PostArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    /// Initialize the current directory instead of the git top level, e.g.
+    /// one package of a monorepo.
+    #[arg(long)]
+    pub here: bool,
 }
 
 #[derive(Debug, Args)]
