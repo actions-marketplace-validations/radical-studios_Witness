@@ -17,7 +17,7 @@ use witness_core::capture::{
     CaptureContext, CapturePlan, HookEvent, HookInput, Phase, ToolAction, call_key, capture_plan,
     events_for, parse_hook,
 };
-use witness_core::record::{Event, EventKind};
+use witness_core::record::{Event, EventKind, session_file_stem};
 
 use crate::cli::{Cli, Command};
 use crate::nudge;
@@ -56,6 +56,9 @@ pub fn run(agent: Option<&str>, event: &str) {
             return;
         }
     };
+    if !first_delivery(&root, &input) {
+        return;
+    }
     let recorded = record(&root, &input);
     if recorded.is_ok() {
         reply(&root, &input, event);
@@ -130,6 +133,52 @@ fn reply(root: &Path, input: &HookInput, event: &str) {
         .and_then(|r| nudge::render(&input.agent, name, &r))
     {
         println!("{text}");
+    }
+}
+
+/// Whether this process is the first to handle this hook call. Claude Code
+/// can run the hook twice (the plugin and the project settings both install
+/// it), so each call is claimed with an exclusively created marker file,
+/// keyed by tool call id and phase, or by turn. Markers live per session
+/// under `.witness/state/seen/` and go when the session ends or a day
+/// later.
+fn first_delivery(root: &Path, input: &HookInput) -> bool {
+    // Only Claude Code can have Witness installed twice; other agents'
+    // call ids may not be unique (e.g. a wrapper script's).
+    if input.agent != "claude-code" {
+        return true;
+    }
+    let seen = root.join(workspace::STATE_DIR).join("seen");
+    let dir = seen.join(session_file_stem(&input.session_id));
+    match &input.event {
+        HookEvent::SessionStart => workspace::remove_stale_dirs(&seen, 24 * 60 * 60),
+        HookEvent::SessionEnd { .. } => {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        _ => {}
+    }
+    let key = match &input.event {
+        HookEvent::Tool(call) => match &call.call_id {
+            Some(id) => format!("{:?}-{id}", call.phase),
+            None => return true,
+        },
+        // Turn events only with a turn id; a repeat of them is harmless
+        // anyway (a reminder is handed over once).
+        HookEvent::Prompt | HookEvent::Stop { .. } => match &input.turn {
+            Some(turn) => format!("{:?}-{turn}", std::mem::discriminant(&input.event)),
+            None => return true,
+        },
+        _ => return true,
+    };
+    let claimed = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(witness_core::record::line_hash(&key)))
+    });
+    match claimed {
+        Ok(_) => true,
+        Err(err) => err.kind() != std::io::ErrorKind::AlreadyExists,
     }
 }
 

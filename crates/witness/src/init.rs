@@ -97,13 +97,6 @@ pub fn run(args: InitArgs) -> Result<()> {
             hooks::agent_names().join(", ")
         );
     }
-    if agents.iter().any(|a| a == "claude-code") {
-        println!(
-            "witness: for Claude Code, the plugin adds a skill and /witness:status and \
-             /witness:review: /plugin marketplace add radical-studios/witness, then /plugin \
-             install witness@radical-studios"
-        );
-    }
 
     match args.ci {
         Some(CiArg::Github) => {

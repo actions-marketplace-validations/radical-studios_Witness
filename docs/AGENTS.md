@@ -99,9 +99,11 @@ Install the plugin (`/plugin install witness@radical-studios`), which
 ships the hooks, a skill that teaches the agent to verify its edits and
 record assumptions, and two commands: `/witness:status` (what is failing or
 unchecked right now) and `/witness:review` (review the branch following
-Witness's plan). Or run `witness hooks install claude-code` to add the hooks to
-`.claude/settings.json`. Don't do both: events would be recorded twice.
-The installer refuses when the plugin is enabled in that file.
+Witness's plan). `witness init` (or `witness hooks install claude-code`)
+also adds the hooks to the project's `.claude/settings.json`, so
+teammates without the plugin are recorded too. Having both is fine: each
+tool call is recorded once. The installer skips the settings when the
+plugin is enabled in that file.
 
 ### Codex CLI
 

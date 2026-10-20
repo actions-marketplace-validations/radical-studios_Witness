@@ -67,6 +67,8 @@ record per event. See [RECORD_FORMAT.md](RECORD_FORMAT.md) for the fields.
 - `last/`: the latest snapshot per session, for agents with only post-tool
   hooks.
 - `reminders/`: end-of-turn reminders waiting for the next prompt.
+- `seen/`: empty marker files that stop a hook installed twice from
+  recording a call twice; removed when the session ends.
 - `history.json`: the track record cache, with line hashes of landed
   sections.
 - `hook.log`: hook errors, and timings with `WITNESS_DEBUG=1`; bounded to

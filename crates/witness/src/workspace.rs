@@ -109,6 +109,23 @@ pub fn log_hook(root: &Path, message: &str) {
     })();
 }
 
+/// Removes the directories in `dir` not modified for `max_age_secs`.
+pub fn remove_stale_dirs(dir: &Path, max_age_secs: u64) {
+    let Some(limit) =
+        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(max_age_secs))
+    else {
+        return;
+    };
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let stale = entry
+            .metadata()
+            .is_ok_and(|m| m.is_dir() && m.modified().is_ok_and(|t| t < limit));
+        if stale {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// The session `witness assume` records into by default: `session\tagent`.
 pub fn write_current_session(root: &Path, session_id: &str, agent: &str) -> Result<()> {
     let path = root.join(CURRENT_SESSION);

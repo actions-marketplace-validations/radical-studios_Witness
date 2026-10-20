@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::{Value, json};
 
@@ -214,6 +215,12 @@ impl ClaudeSession<'_> {
         self
     }
 
+    /// A new tool id: Claude Code gives each call a unique one.
+    pub fn tool_id(&self) -> String {
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        format!("toolu_{}", CALLS.fetch_add(1, Ordering::Relaxed))
+    }
+
     pub fn payload(&self, event: &str, tool: &str, input: Value, response: Value) -> String {
         json!({
             "session_id": self.id,
@@ -224,7 +231,7 @@ impl ClaudeSession<'_> {
             "tool_name": tool,
             "tool_input": input,
             "tool_response": response,
-            "tool_use_id": "toolu_01",
+            "tool_use_id": self.tool_id(),
         })
         .to_string()
     }
@@ -283,7 +290,7 @@ impl ClaudeSession<'_> {
     /// A Bash command that changes files: `PreToolUse`, then `effect` (what
     /// the command did), then `PostToolUse` with exit 0.
     pub fn bash_with(&self, command: &str, effect: impl FnOnce(&TestRepo)) {
-        let id = format!("toolu_{}", command.len());
+        let id = self.tool_id();
         let pre = json!({
             "session_id": self.id,
             "cwd": self.cwd.to_str().unwrap(),
@@ -338,7 +345,7 @@ impl ClaudeSession<'_> {
             "hook_event_name": "PostToolUseFailure",
             "tool_name": "Bash",
             "tool_input": {"command": command},
-            "tool_use_id": "toolu_02",
+            "tool_use_id": self.tool_id(),
             "error": format!("Exit code {code}\nfailed"),
             "is_interrupt": false,
         })

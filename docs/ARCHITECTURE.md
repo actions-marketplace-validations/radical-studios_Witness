@@ -45,7 +45,10 @@ The pipeline is the same for every agent:
    replacements or content), `Read`, `NoWrite` or `Unknown`. Without
    `--agent`, the agent is guessed from the payload's shape.
 2. **Repo root**: the nearest ancestor of the payload's `cwd` containing
-   `.witness/`; if none, the hook exits 0 without writing.
+   `.witness/`; if none, the hook exits 0 without writing. A Claude Code
+   call already handled by another copy of the hook (plugin plus project
+   settings) is skipped: each tool call id is claimed once with an
+   exclusively created marker under `.witness/state/seen/`.
 3. **Capture plan** (`capture_plan`, pure): how to observe the call's file
    changes. Nothing for tools that can't write, for read-only or background
    shell commands, for git commands that move the working tree, and for

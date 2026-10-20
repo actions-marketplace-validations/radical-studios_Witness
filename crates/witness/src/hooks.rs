@@ -62,7 +62,9 @@ const AGENTS: &[AgentHooks] = &[
             ("SessionStart", None, "session-start"),
             ("SessionEnd", None, "session-end"),
         ],
-        note: "Or install the Claude Code plugin instead: /plugin install witness@radical-studios",
+        note: "For a skill and the /witness:status and /witness:review commands, add the plugin: \
+               /plugin marketplace add radical-studios/witness, then /plugin install \
+               witness@radical-studios",
     },
     AgentHooks {
         agent: "codex",

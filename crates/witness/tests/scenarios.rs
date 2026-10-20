@@ -1094,3 +1094,33 @@ fn prune_removes_landed_logs() {
         "{out}"
     );
 }
+
+/// When Claude Code runs Witness's hook twice for one call (the plugin and
+/// the project settings both install it), the call is recorded once, even
+/// when both run at the same time.
+#[test]
+fn a_hook_installed_twice_records_once() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", "fn a() {}\n");
+    repo.init_witness();
+    repo.commit_all("base");
+    let agent = repo.claude("s1");
+    let json = agent.payload(
+        "PostToolUse",
+        "Bash",
+        json!({"command": "cargo test"}),
+        json!({"stdout": "ok", "stderr": ""}),
+    );
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            scope.spawn(|| agent.hook("post-tool-use", &json));
+        }
+    });
+    agent.hook("post-tool-use", &json);
+    let log = repo.read(".witness/sessions/s1.jsonl");
+    assert_eq!(log.matches(r#""kind":"command""#).count(), 1, "{log}");
+
+    // The session's markers go when it ends.
+    agent.end();
+    assert!(!repo.abs(".witness/state/seen/s1").exists());
+}
