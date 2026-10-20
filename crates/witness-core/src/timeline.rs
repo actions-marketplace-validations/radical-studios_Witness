@@ -149,6 +149,46 @@ mod tests {
         assert_eq!(shift(r, &ch(8, 10, 2)), LineRange::new(8, 9));
     }
 
+    proptest::proptest! {
+        /// Lines of a range that survive a later change stay inside the
+        /// shifted range. Checked against a simulated file.
+        #[test]
+        fn shifted_range_covers_surviving_lines(
+            len in 1u32..40,
+            a in 1u32..40,
+            b in 1u32..40,
+            start in 1u32..42,
+            removed in 0u32..10,
+            added in 0u32..10,
+        ) {
+            let (a, b) = (a.min(len), b.min(len));
+            let range = LineRange::new(a, b);
+            let start = start.min(len + 1);
+            let removed = removed.min(len + 1 - start);
+            let change = ch(start, removed, added);
+
+            // Old lines are ids 1..=len; inserted lines get ids above len.
+            let old: Vec<u32> = (1..=len).collect();
+            let s = (start - 1) as usize;
+            let mut new: Vec<u32> = old[..s].to_vec();
+            new.extend((0..added).map(|i| len + 1 + i));
+            new.extend_from_slice(&old[s + removed as usize..]);
+
+            let shifted = shift(range, &change);
+            proptest::prop_assert!(shifted.start >= 1 && shifted.start <= shifted.end);
+            for id in range.start..=range.end {
+                if let Some(pos) = new.iter().position(|&x| x == id) {
+                    let line = u32::try_from(pos).unwrap() + 1;
+                    proptest::prop_assert!(
+                        shifted.start <= line && line <= shifted.end,
+                        "line {} of {:?} is at {} after {:?}, outside {:?}",
+                        id, range, line, change, shifted
+                    );
+                }
+            }
+        }
+    }
+
     fn ev(session: &str, secs: i64, kind: EventKind) -> Event {
         Event::new(
             session,

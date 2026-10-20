@@ -234,6 +234,66 @@ fn unquote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    /// A hunk's header numbers and its removed and added lines.
+    type GenHunk = (u32, Vec<String>, u32, Vec<String>);
+
+    fn gen_hunk() -> impl Strategy<Value = GenHunk> {
+        // Line text may itself look like diff syntax (`+++ x`, `diff --git`,
+        // `@@ ...`): hunks are consumed by count, so that must not matter.
+        let line = prop_oneof![
+            "[^\n\r]{0,20}",
+            Just("+++ b/evil".to_owned()),
+            Just("diff --git a/x b/x".to_owned()),
+            Just("@@ -1 +1 @@".to_owned()),
+        ];
+        (
+            1u32..500,
+            proptest::collection::vec(line.clone(), 0..4),
+            1u32..500,
+            proptest::collection::vec(line, 0..4),
+        )
+            .prop_filter("a hunk changes something", |(_, r, _, a)| {
+                !r.is_empty() || !a.is_empty()
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn parses_generated_hunks_exactly(hunks in proptest::collection::vec(gen_hunk(), 1..5)) {
+            let mut text = String::from("diff --git a/f.rs b/f.rs\nindex 1..2 100644\n--- a/f.rs\n+++ b/f.rs\n");
+            for (old_start, removed, new_start, added) in &hunks {
+                text.push_str(&format!(
+                    "@@ -{old_start},{} +{new_start},{} @@ fn x()\n",
+                    removed.len(),
+                    added.len()
+                ));
+                for l in removed {
+                    text.push_str(&format!("-{l}\n"));
+                }
+                for l in added {
+                    text.push_str(&format!("+{l}\n"));
+                }
+            }
+            let parsed = parse_unified_diff(&text).unwrap();
+            prop_assert_eq!(parsed.len(), hunks.len());
+            for (got, (old_start, removed, new_start, added)) in parsed.iter().zip(&hunks) {
+                prop_assert_eq!(got.file.as_str(), "f.rs");
+                prop_assert_eq!(got.old_start, *old_start);
+                prop_assert_eq!(got.old_count as usize, removed.len());
+                prop_assert_eq!(got.new_start, *new_start);
+                prop_assert_eq!(got.new_count as usize, added.len());
+                prop_assert_eq!(&got.added, added);
+            }
+        }
+
+        #[test]
+        fn never_panics_on_arbitrary_input(body in "\\PC{0,200}") {
+            let _ = parse_unified_diff(&body);
+            let _ = parse_unified_diff(&format!("diff --git a/x b/x\n--- a/x\n+++ b/x\n{body}"));
+        }
+    }
 
     fn summary(hunks: &[Hunk]) -> Vec<(String, u32, u32, u32, u32, usize, bool)> {
         hunks

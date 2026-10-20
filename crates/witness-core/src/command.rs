@@ -266,6 +266,26 @@ mod tests {
         assert_eq!(parts[3].1, None);
     }
 
+    proptest::proptest! {
+        #[test]
+        fn split_and_classify_never_panic(cmd in "\\PC{0,80}") {
+            let _ = split(&cmd);
+            let _ = classify(&Config::default(), &cmd);
+            let _ = redact(&cmd);
+        }
+
+        #[test]
+        fn and_chains_split_into_their_words(
+            words in proptest::collection::vec("[a-z][a-z0-9 ./_-]{0,12}[a-z0-9]", 1..6),
+        ) {
+            let parts = split(&words.join(" && "));
+            let texts: Vec<&str> = parts.iter().map(|(t, _)| t.as_str()).collect();
+            let expected: Vec<&str> = words.iter().map(|w| w.trim()).collect();
+            proptest::prop_assert_eq!(texts, expected);
+            proptest::prop_assert!(parts[..parts.len() - 1].iter().all(|(_, s)| *s == Some(Separator::And)));
+        }
+    }
+
     #[test]
     fn strips_env_assignments_and_wrappers() {
         assert_eq!(
