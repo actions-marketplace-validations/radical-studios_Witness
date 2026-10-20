@@ -74,7 +74,7 @@ Example output:
 <details>
 <summary>1 section to skim</summary>
 
-- `src/lib.rs` 2: checked, `cargo test` passed after the last edit
+- `src/lib.rs` 2: tested, `cargo test` passed after the last edit (12 passed)
 </details>
 ```
 
@@ -97,11 +97,25 @@ survives rebases and later commits. Hunks are split where authors change:
 
 | Status | Meaning | Review |
 | --- | --- | --- |
+| failing | a test or build that covers the file failed after the agent's last edit | look closely |
 | guessed | the agent recorded an assumption about these lines | look closely |
-| unverified | the agent edited them, and no test or build passed afterwards | look closely |
 | unrecorded | committed by an agent (e.g. a `Co-authored-by: Claude` trailer) that left no record on the branch | look closely |
-| checked | a test or build passed after the last edit | skim |
+| unverified | the agent wrote them, and nothing that covers the file passed afterwards | look closely |
+| compiled | only a build passed after the last edit; no test ran | skim |
+| tested | a test that covers the file passed after the last edit | skim |
 | human | no agent edit; not counted | n/a |
+
+"Covers" is read from the command line: `cargo test -p parser` covers only
+the `parser` crate, `go test ./internal/x/...` only that directory, and
+`cd web && npm test` only the `web` package. A piped run
+(`cargo test | tail`) is judged by the runner's own summary line.
+
+Sections also carry signals, such as a test edited right after it failed,
+assertions removed from a test, an edit to a file the agent never read, the
+same lines rewritten over and over, a filtered test run, or a change in a
+`risk = "high"` area. The first two and the high-risk area put a section up
+for close review whatever its status (`[report] escalate` in
+`witness.toml`).
 
 Which commands count as tests or builds is configured in `witness.toml`.
 Defaults cover cargo, npm/pnpm/yarn/bun, pytest, go, gradle and maven.

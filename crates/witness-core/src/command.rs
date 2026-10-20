@@ -367,12 +367,16 @@ fn writes_through_redirect(simple: &str) -> bool {
 }
 
 /// Classification of a whole command line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandVerdict {
     pub class: CommandClass,
     /// Whether the command line's final exit code reflects the classified
     /// part: true when only `&&` follows it.
     pub exit_attributable: bool,
+    /// The classified simple command, without assignments and wrappers.
+    pub simple: String,
+    /// Directories `cd` moved to before it, in order.
+    pub cd: Vec<String>,
 }
 
 /// Classifies a command line: the strongest class among its simple
@@ -397,6 +401,8 @@ pub fn classify(config: &Config, command: &str) -> CommandVerdict {
         return CommandVerdict {
             class: CommandClass::Other,
             exit_attributable: false,
+            simple: String::new(),
+            cd: Vec::new(),
         };
     };
     // With `set -o pipefail` earlier in the line, a failing stage fails the
@@ -407,10 +413,66 @@ pub fn classify(config: &Config, command: &str) -> CommandVerdict {
         Some(Separator::Pipe) => pipefail,
         Some(Separator::Other) => false,
     });
+    let cd = parts[..idx]
+        .iter()
+        .filter_map(|(text, _)| {
+            let words = shell_words(strip_prefixes(text));
+            match words.as_slice() {
+                [cd, dir] if cd == "cd" => Some(dir.clone()),
+                _ => None,
+            }
+        })
+        .collect();
     CommandVerdict {
         class,
         exit_attributable,
+        simple: strip_prefixes(&parts[idx].0).to_owned(),
+        cd,
     }
+}
+
+/// Splits a simple command into words, removing quotes.
+pub fn shell_words(simple: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = simple.chars();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some('"') if c == '\\' => {
+                if let Some(n) = chars.next() {
+                    current.push(n);
+                }
+            }
+            Some(_) => current.push(c),
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                in_word = true;
+            }
+            None if c == '\\' => {
+                if let Some(n) = chars.next() {
+                    current.push(n);
+                    in_word = true;
+                }
+            }
+            None if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            None => {
+                current.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    words
 }
 
 fn is_witness_exec(simple: &str) -> bool {
@@ -506,6 +568,26 @@ mod tests {
     fn verdict(cmd: &str) -> (CommandClass, bool) {
         let v = classify(&Config::default(), cmd);
         (v.class, v.exit_attributable)
+    }
+
+    #[test]
+    fn reports_the_classified_part_and_cds() {
+        let v = classify(
+            &Config::default(),
+            "cd crates/x && RUST_LOG=1 cargo test -p x 2>&1 | tail",
+        );
+        assert_eq!(v.simple, "cargo test -p x 2>&1");
+        assert_eq!(v.cd, vec!["crates/x"]);
+    }
+
+    #[test]
+    fn splits_words() {
+        assert_eq!(
+            shell_words(r#"pytest -k "a and b" 'x y' z\ w"#),
+            vec!["pytest", "-k", "a and b", "x y", "z w"]
+        );
+        assert_eq!(shell_words(""), Vec::<String>::new());
+        assert_eq!(shell_words("a ''"), vec!["a", ""]);
     }
 
     #[test]

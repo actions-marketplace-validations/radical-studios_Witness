@@ -111,22 +111,35 @@ See [RECORD_FORMAT.md](RECORD_FORMAT.md) for the records.
    becomes several segments, so a human tweak inside agent code is its own
    section. Assumptions attach to a segment when they cover the whole file,
    their recorded lines hash the same, or their replayed range overlaps.
-5. **Classify** (`witness-core/src/classify.rs`, the swappable module):
+5. **Classify** (`witness-core/src/classify.rs`, the swappable module). Runs
+   count for a segment when they come after its last edit and cover its
+   file (`witness-core/src/scope.rs`: package selectors such as `cargo -p`,
+   go package paths, npm workspaces, gradle and maven modules, and a working
+   directory that is a package root; package names are resolved with the
+   manifests at head). A run's result is its exit code when that is
+   attributable to it, else the runner's summary line
+   (`witness-core/src/testsum.rs`), else unknown.
 
-   | Status       | Rule | Review |
+   | Status       | Rule | Review (default) |
    | ------------ | ---- | ------ |
-   | `guessed`    | an assumption covers the segment | look closely |
-   | `unrecorded` | no agent edit wrote it, but every line blames to a commit attributed to an agent (`[attribution]`, e.g. a `Co-authored-by: Claude` trailer) that has no records on the branch | look closely |
-   | `human`      | otherwise, no agent edit wrote it | excluded |
-   | `checked`    | a `test` or `build` command exited 0 after the segment's last edit, and no `test`/`build` failed after that pass | skim |
-   | `unverified` | written by the agent, none of the above | look closely |
+   | `failing`    | the last covering test failed, or the last covering build did with no test since | look closely |
+   | `guessed`    | otherwise, an assumption covers the segment | look closely |
+   | `unrecorded` | no agent edit wrote it, but every line blames to a commit attributed to an agent (`[attribution]`) that has no records on the branch | look closely |
+   | `unverified` | written by the agent, nothing above and no covering pass | look closely |
+   | `compiled`   | only a covering build passed | skim |
+   | `tested`     | a covering test passed | skim |
+   | `human`      | no agent edit wrote it | excluded |
 
-   Every segment gets a one-line reason. Commands with `exit_code: null` count
-   as neither pass nor fail. `lint` commands don't verify behavior and
-   are ignored by v0.
-6. **Report.** Flagged segments (guessed first, then unverified, then by path
-   and line) up to `report.max_flagged`; the rest are listed as skimmable.
-   Markdown and JSON carry the same data (`witness_core::report::Report`).
+   Every segment gets a one-line reason, the run that decided it, and
+   signals (`witness-core/src/signals.rs`): `test-changed-after-failure`,
+   `assertions-removed`, `high-risk-area`, `blind-edit`, `thrash`,
+   `filtered-test-run`, `human-modified`. `[report] close` lists the
+   statuses to review closely and `[report] escalate` the signals that add
+   a section to them. `lint` commands don't verify behavior and are ignored.
+6. **Report.** Sections for close review, highest score first (status
+   weight, plus signals, plus size), up to `report.max_flagged`; the rest
+   are listed to skim. Markdown and JSON carry the same data
+   (`witness_core::report::Report`, `schema_version` 2).
 
 ### Report shape
 
@@ -220,10 +233,9 @@ class wins (`test` > `build` > `lint` > `other`).
   short lines apart; they count as the agent's only near its recorded range
   or next to other agent lines, so such a line moved far away by a rebase
   may show as human.
-- **Pipes hide exit codes.** `cargo test | tail` records `exit_code: null`,
-  so such runs never count as checks (unless the line starts with
-  `set -o pipefail`). Agents pipe test output often; the skill asks them not
-  to. A later version could read the test runner's summary line instead.
+- **Unread results.** A run whose exit code isn't attributable (piped,
+  `|| true`) and whose output has no summary Witness recognizes counts as
+  unknown, never as a pass. `witness exec -- <cmd>` records the exact code.
 - **Nested roots.** `.witness/` usually sits at the git top level.
   `witness init --here` puts it in a subdirectory instead (one package of a
   monorepo); reports run from inside it cover only changes below it, with

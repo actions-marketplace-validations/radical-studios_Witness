@@ -1,77 +1,148 @@
-//! v0 classification rules. Kept in one module so they can be swapped.
+//! Classification rules. Kept in one module so they can be swapped.
 //!
 //! For a segment at head (see [`crate::provenance`]), look at the agent
-//! edits that wrote it and the assumptions about it:
+//! edits that wrote it, the assumptions about it, and the test and build
+//! runs after its last edit that cover its file:
 //!
-//! - `guessed`: an assumption was recorded against it;
-//! - `human`: otherwise, no agent edit wrote it (excluded from the count);
-//! - `checked`: a `test` or `build` command exited 0 after the segment's
-//!   last edit, and no `test` or `build` failed after that pass;
-//! - `unverified`: written by the agent, none of the above.
+//! - `failing`: the last covering test run failed, or the last build did
+//!   with no test since;
+//! - `guessed`: otherwise, an assumption was recorded against it;
+//! - `tested`: a covering test passed after the last edit;
+//! - `compiled`: only a covering build passed;
+//! - `unverified`: written by the agent, none of the above;
+//! - `human`: no agent edit wrote it (excluded from the count).
 //!
 //! `unrecorded` is decided by the report from commit metadata: human-looking
 //! lines from a commit attributed to an agent.
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
+use crate::config::Config;
 use crate::provenance::Segment;
-use crate::record::{EventKind, MAX_COMMAND_CHARS, truncate_chars};
+use crate::record::{CommandClass, EventKind, MAX_COMMAND_CHARS, truncate_chars};
+use crate::scope::{self, Coverage, Packages};
+use crate::testsum::{RunOutcome, TestCounts};
 use crate::timeline::{Placed, Timeline};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
+    /// A test or build failed after the last edit.
+    Failing,
+    /// The agent recorded an assumption about these lines.
     Guessed,
-    Unverified,
     /// From a commit attributed to an agent, with no Witness record.
     Unrecorded,
-    Checked,
+    /// Written by the agent; nothing passed afterwards.
+    Unverified,
+    /// Only a build passed after the last edit.
+    Compiled,
+    /// A test covering the file passed after the last edit.
+    Tested,
     Human,
 }
 
 impl Status {
+    pub const ALL: [Status; 7] = [
+        Status::Failing,
+        Status::Guessed,
+        Status::Unrecorded,
+        Status::Unverified,
+        Status::Compiled,
+        Status::Tested,
+        Status::Human,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
+            Status::Failing => "failing",
             Status::Guessed => "guessed",
-            Status::Unverified => "unverified",
             Status::Unrecorded => "unrecorded",
-            Status::Checked => "checked",
+            Status::Unverified => "unverified",
+            Status::Compiled => "compiled",
+            Status::Tested => "tested",
             Status::Human => "human",
         }
     }
 
-    /// Whether reviewers should look closely.
-    pub fn is_flagged(&self) -> bool {
-        matches!(
-            self,
-            Status::Guessed | Status::Unverified | Status::Unrecorded
-        )
+    /// Base priority for ordering sections to review.
+    pub fn weight(&self) -> u32 {
+        match self {
+            Status::Failing => 100,
+            Status::Guessed => 80,
+            Status::Unrecorded => 70,
+            Status::Unverified => 60,
+            Status::Compiled => 30,
+            Status::Tested => 10,
+            Status::Human => 0,
+        }
     }
 }
 
-/// The verdict for one hunk.
+/// The verdict for one segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
     pub status: Status,
     /// One line, for reviewers.
     pub reason: String,
-    /// Agent of the last overlapping edit, if any.
+    /// Agent of the last edit (or assumption), if any.
     pub agent: Option<String>,
+    pub evidence: Evidence,
+}
+
+/// What the verdict rests on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Evidence {
+    /// When the agent last edited these lines.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::record::timestamp::option"
+    )]
+    pub last_edit: Option<OffsetDateTime>,
+    /// Agent edits that wrote these lines.
+    pub edits: usize,
+    /// The run that decided the status, if one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunRef {
+    pub command: String,
+    pub class: CommandClass,
+    pub outcome: RunOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<TestCounts>,
+    /// Only some tests ran.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub filtered: bool,
+    #[serde(with = "crate::record::timestamp")]
+    pub at: OffsetDateTime,
+}
+
+/// What classification looks at besides the segment.
+pub struct ClassifyContext<'a> {
+    pub timeline: &'a Timeline,
+    pub config: &'a Config,
+    pub packages: &'a dyn Packages,
 }
 
 /// A swappable set of classification rules.
 pub trait Classifier {
-    fn classify(&self, segment: &Segment, timeline: &Timeline) -> Verdict;
+    fn classify(&self, segment: &Segment, ctx: &ClassifyContext<'_>) -> Verdict;
 }
 
-/// The v0 rules described in the module docs.
+/// The rules described in the module docs.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct V0Rules;
+pub struct DefaultRules;
 
 const MAX_REASON_TEXT: usize = 120;
 
-impl Classifier for V0Rules {
-    fn classify(&self, segment: &Segment, timeline: &Timeline) -> Verdict {
+impl Classifier for DefaultRules {
+    fn classify(&self, segment: &Segment, ctx: &ClassifyContext<'_>) -> Verdict {
+        let timeline = ctx.timeline;
         let placed = |idx: &usize| timeline.events.get(*idx);
         let assumptions: Vec<&Placed> = segment.assumptions.iter().filter_map(placed).collect();
         let mut edits: Vec<&Placed> = segment.edits.iter().filter_map(placed).collect();
@@ -80,8 +151,7 @@ impl Classifier for V0Rules {
             .last()
             .or(assumptions.last())
             .map(|p| p.event.agent.clone());
-
-        if let Some(first) = assumptions.first() {
+        let assumed = assumptions.first().map(|first| {
             let text = match &first.event.kind {
                 EventKind::Assumption { text, .. } => one_line(text, MAX_REASON_TEXT),
                 _ => String::new(),
@@ -90,75 +160,183 @@ impl Classifier for V0Rules {
                 1 => String::new(),
                 n => format!(" (+{} more)", n - 1),
             };
-            return Verdict {
-                status: Status::Guessed,
-                reason: format!("Assumed: {text}{more}"),
-                agent,
-            };
-        }
+            format!("Assumed: {text}{more}")
+        });
 
         let Some(last_edit) = edits.last() else {
-            return Verdict {
-                status: Status::Human,
-                reason: "No agent edit recorded for these lines".to_owned(),
-                agent: None,
+            return match assumed {
+                Some(reason) => Verdict {
+                    status: Status::Guessed,
+                    reason,
+                    agent,
+                    evidence: Evidence::default(),
+                },
+                None => Verdict {
+                    status: Status::Human,
+                    reason: "No agent edit recorded for these lines".to_owned(),
+                    agent: None,
+                    evidence: Evidence::default(),
+                },
             };
         };
         let who = last_edit.event.agent.as_str();
 
-        // Verifying runs after the last edit, in order.
-        let runs: Vec<(&Placed, &str, Option<i32>)> = timeline
-            .events
-            .iter()
-            .filter(|p| p.order > last_edit.order)
-            .filter_map(|p| match &p.event.kind {
-                EventKind::Command {
-                    classification,
-                    exit_code,
-                    command,
-                } if classification.verifies() => Some((p, command.as_str(), *exit_code)),
-                _ => None,
-            })
-            .collect();
-
-        let last_pass = runs.iter().rev().find(|(_, _, code)| *code == Some(0));
-        let last_fail = runs
-            .iter()
-            .rev()
-            .find(|(_, _, code)| code.is_some_and(|c| c != 0));
-
-        match (last_pass, last_fail) {
-            (Some((pass, cmd, _)), fail) if fail.is_none_or(|(f, _, _)| f.order < pass.order) => {
-                Verdict {
-                    status: Status::Checked,
-                    reason: format!("`{}` passed after the last edit", code_text(cmd)),
-                    agent: Some(who.to_owned()),
-                }
+        // Test and build runs after the last edit that cover this file.
+        let mut last_test: Option<(&Placed, RunOutcome)> = None;
+        let mut last_build: Option<(&Placed, RunOutcome)> = None;
+        let mut unknown: Option<&Placed> = None;
+        let mut elsewhere: Option<(&Placed, Vec<String>)> = None;
+        for p in timeline.events.iter().filter(|p| p.order > last_edit.order) {
+            let EventKind::Command {
+                classification,
+                scope,
+                ..
+            } = &p.event.kind
+            else {
+                continue;
+            };
+            if !classification.verifies() {
+                continue;
             }
-            (_, Some((_, cmd, code))) => Verdict {
-                status: Status::Unverified,
-                reason: format!(
-                    "Edited by {who}; `{}` failed (exit {}) after the last edit",
-                    code_text(cmd),
-                    code.unwrap_or_default()
-                ),
-                agent: Some(who.to_owned()),
-            },
-            _ => {
-                let reason = match runs.last() {
-                    Some((_, cmd, _)) => format!(
-                        "Edited by {who}; `{}` ran after the last edit but its exit code is unknown",
-                        code_text(cmd)
-                    ),
-                    None => format!("Edited by {who}; no test or build ran after the last edit"),
-                };
-                Verdict {
-                    status: Status::Unverified,
-                    reason,
-                    agent: Some(who.to_owned()),
+            let outcome = p.event.run_outcome();
+            if let Coverage::Outside(dirs) =
+                scope::covers(scope.as_ref(), &segment.file, ctx.packages)
+            {
+                if outcome == Some(RunOutcome::Passed) {
+                    elsewhere = Some((p, dirs));
                 }
+                continue;
+            }
+            match (outcome, classification) {
+                (Some(o), CommandClass::Test) => last_test = Some((p, o)),
+                (Some(o), _) => last_build = Some((p, o)),
+                (None, _) => unknown = Some(p),
             }
         }
+
+        use RunOutcome::{Failed, Passed};
+        let (status, reason, run) = match (last_test, last_build) {
+            (Some((t, Failed)), _) => (Status::Failing, failed_reason(t), Some(t)),
+            (Some((t, Passed)), Some((b, Failed))) if b.order > t.order => {
+                (Status::Failing, failed_reason(b), Some(b))
+            }
+            (Some((t, Passed)), _) => (
+                Status::Tested,
+                format!(
+                    "`{}` passed after the last edit{}",
+                    code_text(command_of(t)),
+                    counts_suffix(t)
+                ),
+                Some(t),
+            ),
+            (None, Some((b, Failed))) => (Status::Failing, failed_reason(b), Some(b)),
+            (None, Some((b, Passed))) => (
+                Status::Compiled,
+                format!(
+                    "Only built after the last edit: `{}` passed; no test ran",
+                    code_text(command_of(b))
+                ),
+                Some(b),
+            ),
+            (None, None) => {
+                let reason = match (unknown, &elsewhere) {
+                    (Some(p), _) => format!(
+                        "Edited by {who}; `{}` ran after the last edit but its result is unknown",
+                        code_text(command_of(p))
+                    ),
+                    (None, Some((p, dirs))) => format!(
+                        "Edited by {who}; `{}` passed after the last edit but covers only {}",
+                        code_text(command_of(p)),
+                        dirs.iter()
+                            .map(|d| format!("`{d}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    (None, None) => {
+                        format!("Edited by {who}; no test or build ran after the last edit")
+                    }
+                };
+                (Status::Unverified, reason, None)
+            }
+        };
+        let (status, reason) = match assumed {
+            Some(assumed) if status != Status::Failing => (Status::Guessed, assumed),
+            _ => (status, reason),
+        };
+        Verdict {
+            status,
+            reason,
+            agent,
+            evidence: Evidence {
+                last_edit: Some(last_edit.event.timestamp),
+                edits: edits.len(),
+                run: run.and_then(run_ref),
+            },
+        }
+    }
+}
+
+fn command_of(p: &Placed) -> &str {
+    match &p.event.kind {
+        EventKind::Command { command, .. } => command,
+        _ => "",
+    }
+}
+
+fn run_ref(p: &Placed) -> Option<RunRef> {
+    let EventKind::Command {
+        classification,
+        command,
+        tests,
+        scope,
+        ..
+    } = &p.event.kind
+    else {
+        return None;
+    };
+    Some(RunRef {
+        command: command.clone(),
+        class: *classification,
+        outcome: p.event.run_outcome()?,
+        tests: *tests,
+        filtered: scope.as_ref().is_some_and(|s| s.filtered),
+        at: p.event.timestamp,
+    })
+}
+
+fn failed_reason(p: &Placed) -> String {
+    let mut detail: Vec<String> = Vec::new();
+    if let EventKind::Command {
+        exit_code, tests, ..
+    } = &p.event.kind
+    {
+        if let Some(code) = exit_code.filter(|c| *c != 0) {
+            detail.push(format!("exit {code}"));
+        }
+        if let Some(failed) = tests.and_then(|t| t.failed).filter(|n| *n > 0) {
+            detail.push(format!("{failed} failed"));
+        }
+    }
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", detail.join(", "))
+    };
+    format!(
+        "`{}` failed{detail} after the last edit",
+        code_text(command_of(p))
+    )
+}
+
+fn counts_suffix(p: &Placed) -> String {
+    match &p.event.kind {
+        EventKind::Command {
+            tests: Some(tests), ..
+        } => tests
+            .describe()
+            .map(|d| format!(" ({d})"))
+            .unwrap_or_default(),
+        _ => String::new(),
     }
 }
 
@@ -180,7 +358,7 @@ fn code_text(cmd: &str) -> String {
 mod tests {
     use super::*;
     use crate::hunk::Hunk;
-    use crate::record::{Change, CommandClass, Event, LineRange};
+    use crate::record::{Change, Event, LineRange};
     use time::Duration;
     use time::macros::datetime;
 
@@ -245,6 +423,9 @@ mod tests {
                 classification: class,
                 exit_code: exit,
                 command: cmd.into(),
+                outcome: None,
+                tests: None,
+                scope: None,
             })
         }
         fn assume(self, file: &str, lines: Option<(u32, u32)>, text: &str) -> Self {
@@ -255,10 +436,43 @@ mod tests {
                 line_hashes: None,
             })
         }
+        fn run_scoped(self, cmd: &str, exit: i32, scope: crate::scope::Scope) -> Self {
+            self.push(EventKind::Command {
+                classification: CommandClass::Test,
+                exit_code: Some(exit),
+                command: cmd.into(),
+                outcome: None,
+                tests: None,
+                scope: Some(scope),
+            })
+        }
+        fn run_summary(self, cmd: &str, outcome: RunOutcome, failed: u32) -> Self {
+            self.push(EventKind::Command {
+                classification: CommandClass::Test,
+                exit_code: None,
+                command: cmd.into(),
+                outcome: Some(outcome),
+                tests: Some(TestCounts {
+                    passed: Some(10),
+                    failed: Some(failed),
+                    skipped: None,
+                }),
+                scope: None,
+            })
+        }
         fn verdict(self, hunk: &Hunk) -> Verdict {
+            self.verdict_with(hunk, &crate::scope::NoPackages)
+        }
+        fn verdict_with(self, hunk: &Hunk, packages: &dyn Packages) -> Verdict {
             let timeline = Timeline::build(vec![self.0]);
             let segments = crate::provenance::attribute(std::slice::from_ref(hunk), &timeline);
-            V0Rules.classify(&segments[0], &timeline)
+            let config = Config::default();
+            let ctx = ClassifyContext {
+                timeline: &timeline,
+                config: &config,
+                packages,
+            };
+            DefaultRules.classify(&segments[0], &ctx)
         }
     }
 
@@ -292,7 +506,7 @@ mod tests {
             .assume("b.rs", Some((10, 12)), "y")
             .run(CommandClass::Test, "cargo test", Some(0))
             .verdict(&hunk("a.rs", 10, 5));
-        assert_eq!(v.status, Status::Checked);
+        assert_eq!(v.status, Status::Tested);
     }
 
     #[test]
@@ -312,18 +526,18 @@ mod tests {
             .edit("a.rs", 10, 5)
             .run(CommandClass::Test, "cargo test", Some(0))
             .verdict(&hunk("a.rs", 10, 5));
-        assert_eq!(v.status, Status::Checked);
+        assert_eq!(v.status, Status::Tested);
         assert_eq!(v.reason, "`cargo test` passed after the last edit");
         assert_eq!(v.agent.as_deref(), Some("claude-code"));
     }
 
     #[test]
-    fn checked_by_build_too() {
+    fn a_build_alone_is_compiled() {
         let v = Log::new()
             .edit("a.rs", 10, 5)
             .run(CommandClass::Build, "cargo build", Some(0))
             .verdict(&hunk("a.rs", 10, 5));
-        assert_eq!(v.status, Status::Checked);
+        assert_eq!(v.status, Status::Compiled);
     }
 
     #[test]
@@ -351,17 +565,106 @@ mod tests {
     }
 
     #[test]
-    fn unverified_when_test_failed_after_pass() {
+    fn failing_when_test_failed_after_last_edit() {
         let v = Log::new()
             .edit("a.rs", 10, 5)
             .run(CommandClass::Build, "cargo build", Some(0))
             .run(CommandClass::Test, "cargo test", Some(101))
             .verdict(&hunk("a.rs", 10, 5));
+        assert_eq!(v.status, Status::Failing);
+        assert_eq!(
+            v.reason,
+            "`cargo test` failed (exit 101) after the last edit"
+        );
+    }
+
+    #[test]
+    fn failing_outranks_assumptions() {
+        let v = Log::new()
+            .edit("a.rs", 10, 5)
+            .assume("a.rs", None, "x")
+            .run(CommandClass::Test, "cargo test", Some(1))
+            .verdict(&hunk("a.rs", 10, 5));
+        assert_eq!(v.status, Status::Failing);
+    }
+
+    #[test]
+    fn only_a_build_is_compiled() {
+        let v = Log::new()
+            .edit("a.rs", 10, 5)
+            .run(CommandClass::Build, "cargo check", Some(0))
+            .verdict(&hunk("a.rs", 10, 5));
+        assert_eq!(v.status, Status::Compiled);
+        assert_eq!(
+            v.reason,
+            "Only built after the last edit: `cargo check` passed; no test ran"
+        );
+        let v = Log::new()
+            .edit("a.rs", 10, 5)
+            .run(CommandClass::Build, "cargo check", Some(101))
+            .verdict(&hunk("a.rs", 10, 5));
+        assert_eq!(v.status, Status::Failing);
+    }
+
+    #[test]
+    fn summaries_decide_piped_runs() {
+        let v = Log::new()
+            .edit("a.rs", 10, 5)
+            .run_summary("cargo test 2>&1 | tail", RunOutcome::Failed, 2)
+            .verdict(&hunk("a.rs", 10, 5));
+        assert_eq!(v.status, Status::Failing);
+        assert_eq!(
+            v.reason,
+            "`cargo test 2>&1 \\| tail` failed (2 failed) after the last edit".replace("\\|", "|")
+        );
+        let v = Log::new()
+            .edit("a.rs", 10, 5)
+            .run_summary("cargo test | tail", RunOutcome::Passed, 0)
+            .verdict(&hunk("a.rs", 10, 5));
+        assert_eq!(v.status, Status::Tested);
+        assert_eq!(
+            v.reason,
+            "`cargo test | tail` passed after the last edit (10 passed)"
+        );
+        assert_eq!(v.evidence.run.unwrap().tests.unwrap().passed, Some(10));
+    }
+
+    struct Pkgs;
+    impl Packages for Pkgs {
+        fn dir_of(&self, name: &str) -> Option<String> {
+            Some(format!("crates/{name}"))
+        }
+        fn is_package_root(&self, _dir: &str) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn runs_scoped_elsewhere_do_not_count() {
+        let other = crate::scope::Scope {
+            packages: vec!["other".into()],
+            ..crate::scope::Scope::default()
+        };
+        let v = Log::new()
+            .edit("crates/core/a.rs", 10, 5)
+            .run_scoped("cargo test -p other", 0, other.clone())
+            .verdict_with(&hunk("crates/core/a.rs", 10, 5), &Pkgs);
         assert_eq!(v.status, Status::Unverified);
         assert_eq!(
             v.reason,
-            "Edited by claude-code; `cargo test` failed (exit 101) after the last edit"
+            "Edited by claude-code; `cargo test -p other` passed after the last edit but covers only `crates/other`"
         );
+        let mine = crate::scope::Scope {
+            packages: vec!["core".into()],
+            filtered: true,
+            ..crate::scope::Scope::default()
+        };
+        let v = Log::new()
+            .edit("crates/core/a.rs", 10, 5)
+            .run_scoped("cargo test -p core parse", 0, mine)
+            .verdict_with(&hunk("crates/core/a.rs", 10, 5), &Pkgs);
+        assert_eq!(v.status, Status::Tested);
+        assert!(v.evidence.run.unwrap().filtered);
     }
 
     #[test]
@@ -371,7 +674,7 @@ mod tests {
             .run(CommandClass::Test, "cargo test", Some(1))
             .run(CommandClass::Test, "cargo test", Some(0))
             .verdict(&hunk("a.rs", 10, 5));
-        assert_eq!(v.status, Status::Checked);
+        assert_eq!(v.status, Status::Tested);
     }
 
     #[test]
@@ -381,7 +684,7 @@ mod tests {
             .run(CommandClass::Test, "cargo test | tail", None)
             .verdict(&hunk("a.rs", 10, 5));
         assert_eq!(v.status, Status::Unverified);
-        assert!(v.reason.contains("exit code is unknown"), "{}", v.reason);
+        assert!(v.reason.contains("result is unknown"), "{}", v.reason);
     }
 
     #[test]
@@ -400,7 +703,7 @@ mod tests {
             .run(CommandClass::Test, "cargo test", Some(0))
             .edit("a.rs", 10, 5);
         let v = log.verdict(&hunk("a.rs", 55, 1));
-        assert_eq!(v.status, Status::Checked);
+        assert_eq!(v.status, Status::Tested);
     }
 
     #[test]

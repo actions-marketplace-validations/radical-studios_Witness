@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::scope::Scope;
+use crate::testsum::{RunOutcome, TestCounts};
+
 /// Version written by this build. Readers skip lines with a higher version.
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -64,6 +67,16 @@ pub enum EventKind {
         classification: CommandClass,
         exit_code: Option<i32>,
         command: String,
+        /// Whether the test or build passed: from an attributable exit code,
+        /// else from the runner's summary in the output. Absent if unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<RunOutcome>,
+        /// Test counts from the runner's summary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tests: Option<TestCounts>,
+        /// What the run covers; absent for the whole repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<Scope>,
     },
     Assumption {
         file: String,
@@ -195,6 +208,25 @@ impl Event {
         }
     }
 
+    /// For a command: whether it passed, from `outcome`, or from
+    /// `exit_code` in older logs.
+    pub fn run_outcome(&self) -> Option<RunOutcome> {
+        match &self.kind {
+            EventKind::Command {
+                outcome, exit_code, ..
+            } => outcome.or_else(|| {
+                exit_code.map(|c| {
+                    if c == 0 {
+                        RunOutcome::Passed
+                    } else {
+                        RunOutcome::Failed
+                    }
+                })
+            }),
+            _ => None,
+        }
+    }
+
     /// The file this event is about, if any.
     pub fn file(&self) -> Option<&str> {
         match &self.kind {
@@ -311,6 +343,30 @@ pub mod timestamp {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<OffsetDateTime, D::Error> {
         let text = String::deserialize(d)?;
         parse(&text).map_err(serde::de::Error::custom)
+    }
+
+    /// The same format for an optional timestamp.
+    pub mod option {
+        use serde::{Deserialize, Deserializer, Serializer};
+        use time::OffsetDateTime;
+
+        pub fn serialize<S: Serializer>(
+            ts: &Option<OffsetDateTime>,
+            s: S,
+        ) -> Result<S::Ok, S::Error> {
+            match ts {
+                Some(ts) => super::serialize(ts, s),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            d: D,
+        ) -> Result<Option<OffsetDateTime>, D::Error> {
+            Option::<String>::deserialize(d)?
+                .map(|text| super::parse(&text).map_err(serde::de::Error::custom))
+                .transpose()
+        }
     }
 }
 

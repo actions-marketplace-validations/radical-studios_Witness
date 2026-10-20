@@ -10,12 +10,12 @@ expression: markdown
 | File | Lines | Status | Why |
 | --- | --- | --- | --- |
 | `src/parse.rs` | 1-4 | guessed | Assumed: callers always pass UTF-8 |
-| `src/lib.rs` | 10 | unverified | Edited by claude-code; `cargo test 2>&1 \| tail -20` ran after the last edit but its exit code is unknown |
+| `src/lib.rs` | 10 | unverified | Edited by claude-code; `cargo test 2>&1 \| tail -20` ran after the last edit but its result is unknown |
 
 <details>
 <summary>1 section to skim</summary>
 
-- `src/lib.rs` 2: checked, `cargo test` passed after the last edit
+- `src/lib.rs` 2: tested, `cargo test` passed after the last edit
 </details>
 
 <sub>Track record: No track record yet. · 1 human-written section not counted · 1 agent session.</sub>

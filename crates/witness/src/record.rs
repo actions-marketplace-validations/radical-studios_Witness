@@ -3,8 +3,11 @@
 
 use anyhow::{Context, Result, anyhow};
 use time::OffsetDateTime;
+use witness_core::capture::{normalize, relative_to};
 use witness_core::command;
-use witness_core::record::{EditVia, Event, EventKind};
+use witness_core::record::{CommandClass, EditVia, Event, EventKind};
+use witness_core::scope;
+use witness_core::testsum::RunOutcome;
 
 use crate::cli::{RecordArgs, RecordWhat};
 use crate::exec::shell_join;
@@ -44,10 +47,25 @@ pub fn run(args: RecordArgs) -> Result<()> {
             let config = workspace::load_config(&root)?;
             let text = shell_join(&command);
             let verdict = command::classify(&config, &text);
+            let exit_code = exit_code.filter(|_| verdict.exit_attributable);
+            let checks = verdict.class != CommandClass::Other;
+            let outcome = exit_code.filter(|_| checks).map(|c| {
+                if c == 0 {
+                    RunOutcome::Passed
+                } else {
+                    RunOutcome::Failed
+                }
+            });
+            let cwd = relative_to(&normalize(&cwd), &normalize(&root));
             let kind = EventKind::Command {
                 classification: verdict.class,
-                exit_code: exit_code.filter(|_| verdict.exit_attributable),
+                exit_code,
                 command: command::sanitize_command(&text),
+                outcome,
+                tests: None,
+                scope: checks
+                    .then(|| scope::parse(&verdict.simple, cwd.as_deref(), &verdict.cd))
+                    .flatten(),
             };
             let summary = format!("{} command", verdict.class.as_str());
             (kind, summary)

@@ -1,15 +1,18 @@
 //! Builds the review plan and renders it as markdown or JSON.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::classify::{Classifier, Status, Verdict};
+use crate::classify::{Classifier, ClassifyContext, Evidence, Status, Verdict};
 use crate::config::Config;
 use crate::history::{HistoryStore, HunkFingerprint};
 use crate::hunk::Hunk;
 use crate::provenance::{self, Segment};
 use crate::record::Event;
+use crate::scope::Packages;
+use crate::signals::{self, Signal};
 use crate::timeline::Timeline;
 
 /// Hidden marker on the first line of the markdown report. Platform adapters
@@ -17,7 +20,7 @@ use crate::timeline::Timeline;
 pub const REPORT_MARKER: &str = "<!-- witness:report -->";
 
 /// Version of the JSON report shape.
-pub const REPORT_SCHEMA_VERSION: u32 = 1;
+pub const REPORT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Report {
@@ -27,30 +30,40 @@ pub struct Report {
     pub summary: Summary,
     /// Sections to look at closely, highest priority first, up to the cap.
     pub flagged: Vec<Section>,
-    /// Flagged sections beyond `report.max_flagged`.
+    /// Sections for close review beyond `report.max_flagged`.
     pub over_cap: Vec<Section>,
-    /// Sections that were checked.
+    /// Sections to skim, by path.
     pub skim: Vec<Section>,
     pub track_record: TrackRecordNote,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Summary {
     /// Agent-written sections (everything except `human`).
     pub sections: usize,
     /// Sections listed for close review (`flagged.len()`).
     pub review_closely: usize,
+    pub failing: usize,
     pub guessed: usize,
-    pub unverified: usize,
     /// From commits attributed to an agent, with no Witness record.
-    #[serde(default)]
     pub unrecorded: usize,
-    pub checked: usize,
+    pub unverified: usize,
+    pub compiled: usize,
+    pub tested: usize,
     /// Sections with no agent edit, not counted in `sections`.
     pub human: usize,
     pub sessions: usize,
     /// Session log lines that could not be read.
     pub skipped_lines: usize,
+    pub lines: LineCounts,
+}
+
+/// Agent-written lines added, by how they were checked.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineCounts {
+    pub agent: usize,
+    pub tested: usize,
+    pub compiled: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +79,14 @@ pub struct Section {
     pub reason: String,
     pub agent: Option<String>,
     pub area: String,
+    #[serde(default)]
+    pub signals: Vec<Signal>,
+    /// Priority for review; higher first.
+    pub score: u32,
+    #[serde(default)]
+    pub evidence: Evidence,
+    /// Lines this section adds.
+    pub lines_added: usize,
     pub fingerprint: HunkFingerprint,
 }
 
@@ -86,6 +107,8 @@ pub struct ReportInput<'a> {
     pub config: &'a Config,
     pub classifier: &'a dyn Classifier,
     pub history: &'a dyn HistoryStore,
+    /// Package lookups at head, to tell what a scoped test run covers.
+    pub packages: &'a dyn Packages,
     /// For lines no recorded agent edit wrote: the agent their commit is
     /// attributed to (e.g. by a `Co-authored-by` trailer), if any.
     pub commit_agent: &'a dyn Fn(&Segment) -> Option<String>,
@@ -96,26 +119,35 @@ pub fn no_commit_agent(_: &Segment) -> Option<String> {
     None
 }
 
+/// Score added by a signal that escalates to close review, and by others.
+const ESCALATING_SIGNAL_SCORE: u32 = 20;
+const SIGNAL_SCORE: u32 = 5;
+
 pub fn build(input: ReportInput<'_>) -> Report {
+    let config = input.config;
     let session_count = input.sessions.len();
     let timeline = Timeline::build(input.sessions);
     let segments = provenance::attribute(input.hunks, &timeline);
+    let ctx = ClassifyContext {
+        timeline: &timeline,
+        config,
+        packages: input.packages,
+    };
+    let human_hunks: HashSet<usize> = segments
+        .iter()
+        .filter(|s| !s.by_agent() && s.assumptions.is_empty())
+        .map(|s| s.hunk)
+        .collect();
 
     let mut flagged = Vec::new();
     let mut skim = Vec::new();
     let mut summary = Summary {
-        sections: 0,
-        review_closely: 0,
-        guessed: 0,
-        unverified: 0,
-        unrecorded: 0,
-        checked: 0,
-        human: 0,
         sessions: session_count,
         skipped_lines: input.skipped_lines,
+        ..Summary::default()
     };
     for segment in &segments {
-        let mut verdict = input.classifier.classify(segment, &timeline);
+        let mut verdict = input.classifier.classify(segment, &ctx);
         if verdict.status == Status::Human
             && let Some(agent) = (input.commit_agent)(segment)
         {
@@ -125,19 +157,47 @@ pub fn build(input: ReportInput<'_>) -> Report {
                     "Committed as written by {agent}, but no Witness record covers these lines"
                 ),
                 agent: Some(agent),
+                evidence: Evidence::default(),
             };
         }
+        let lines_added = segment.added.len();
         match verdict.status {
             Status::Human => {
                 summary.human += 1;
                 continue;
             }
+            Status::Failing => summary.failing += 1,
             Status::Guessed => summary.guessed += 1,
-            Status::Unverified => summary.unverified += 1,
             Status::Unrecorded => summary.unrecorded += 1,
-            Status::Checked => summary.checked += 1,
+            Status::Unverified => summary.unverified += 1,
+            Status::Compiled => {
+                summary.compiled += 1;
+                summary.lines.compiled += lines_added;
+            }
+            Status::Tested => {
+                summary.tested += 1;
+                summary.lines.tested += lines_added;
+            }
         }
         summary.sections += 1;
+        summary.lines.agent += lines_added;
+
+        let human_nearby = segment.by_agent() && human_hunks.contains(&segment.hunk);
+        let signals = signals::for_segment(segment, &verdict, human_nearby, &timeline, config);
+        let close =
+            config.closes(verdict.status) || signals.iter().any(|s| config.escalates(s.kind));
+        let score = verdict.status.weight()
+            + signals
+                .iter()
+                .map(|s| {
+                    if config.escalates(s.kind) {
+                        ESCALATING_SIGNAL_SCORE
+                    } else {
+                        SIGNAL_SCORE
+                    }
+                })
+                .sum::<u32>()
+            + u32::try_from((lines_added / 5).min(10)).unwrap_or(10);
         let (start, end) = segment.bounds();
         let section = Section {
             file: segment.file.clone(),
@@ -147,10 +207,14 @@ pub fn build(input: ReportInput<'_>) -> Report {
             status: verdict.status,
             reason: verdict.reason,
             agent: verdict.agent,
-            area: input.config.area_for(&segment.file).to_owned(),
+            area: config.area_for(&segment.file).to_owned(),
+            signals,
+            score,
+            evidence: verdict.evidence,
+            lines_added,
             fingerprint: HunkFingerprint::new(&segment.file, &segment.added),
         };
-        if section.status.is_flagged() {
+        if close {
             flagged.push(section);
         } else {
             skim.push(section);
@@ -158,10 +222,14 @@ pub fn build(input: ReportInput<'_>) -> Report {
     }
 
     let position = |s: &Section| (s.file.clone(), s.start.unwrap_or(0));
-    flagged.sort_by_key(|s| (s.status, position(s)));
+    flagged.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| position(a).cmp(&position(b)))
+    });
     skim.sort_by_key(position);
-    let over_cap = if flagged.len() > input.config.max_flagged() {
-        flagged.split_off(input.config.max_flagged())
+    let over_cap = if flagged.len() > config.max_flagged() {
+        flagged.split_off(config.max_flagged())
     } else {
         Vec::new()
     };
@@ -205,6 +273,7 @@ impl Report {
         let _ = writeln!(out, "{REPORT_MARKER}");
         let _ = writeln!(out, "### Witness review plan");
         let _ = writeln!(out);
+        let sections = plural(s.sections, "section", "sections");
         if s.sections == 0 {
             let _ = writeln!(
                 out,
@@ -215,25 +284,20 @@ impl Report {
         } else if s.review_closely == 0 {
             let _ = writeln!(
                 out,
-                "**Review 0 of {} {} closely: every agent-written section was checked.**",
-                s.sections,
-                plural(s.sections, "section", "sections")
+                "**Review 0 of {} {sections} closely: nothing failed, was guessed or went unchecked.**",
+                s.sections
             );
         } else if s.review_closely == s.sections {
             let _ = writeln!(
                 out,
-                "**Review {} of {} {} closely.**",
-                s.review_closely,
-                s.sections,
-                plural(s.sections, "section", "sections")
+                "**Review {} of {} {sections} closely.**",
+                s.review_closely, s.sections
             );
         } else {
             let _ = writeln!(
                 out,
-                "**Review {} of {} {} closely, skim the rest.**",
-                s.review_closely,
-                s.sections,
-                plural(s.sections, "section", "sections")
+                "**Review {} of {} {sections} closely, skim the rest.**",
+                s.review_closely, s.sections
             );
         }
 
@@ -248,7 +312,7 @@ impl Report {
                     code(&sec.file),
                     sec.lines,
                     sec.status.as_str(),
-                    cell(&sec.reason)
+                    cell(&why(sec))
                 );
             }
         }
@@ -258,7 +322,7 @@ impl Report {
             let _ = writeln!(out, "<details>");
             let _ = writeln!(
                 out,
-                "<summary>{} more {} also lacked verification (over the cap of {})</summary>",
+                "<summary>{} more {} to review closely (over the cap of {})</summary>",
                 self.over_cap.len(),
                 plural(self.over_cap.len(), "section", "sections"),
                 self.flagged.len()
@@ -308,6 +372,15 @@ impl Report {
     }
 }
 
+/// The reason, with signal details appended.
+fn why(sec: &Section) -> String {
+    if sec.signals.is_empty() {
+        return sec.reason.clone();
+    }
+    let details: Vec<&str> = sec.signals.iter().map(|s| s.detail.as_str()).collect();
+    format!("{} ({})", sec.reason, details.join("; "))
+}
+
 fn write_list(out: &mut String, sections: &[Section]) {
     for sec in sections {
         let _ = writeln!(
@@ -316,7 +389,7 @@ fn write_list(out: &mut String, sections: &[Section]) {
             code(&sec.file),
             sec.lines,
             sec.status.as_str(),
-            lowercase_first(&sec.reason)
+            lowercase_first(&why(sec))
         );
     }
 }
@@ -346,20 +419,21 @@ fn lowercase_first(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classify::V0Rules;
+    use crate::classify::DefaultRules;
     use crate::history::NullHistoryStore;
     use crate::record::{Change, CommandClass, EventKind, LineRange};
+    use crate::scope::NoPackages;
     use time::Duration;
     use time::macros::datetime;
 
-    fn hunk(file: &str, new_start: u32, new_count: u32) -> Hunk {
+    fn hunk(file: &str, new_start: u32, lines: &[&str]) -> Hunk {
         Hunk {
             file: file.into(),
             old_start: new_start,
             old_count: 0,
             new_start,
-            new_count,
-            added: vec!["x".into()],
+            new_count: u32::try_from(lines.len()).unwrap(),
+            added: lines.iter().map(|s| (*s).to_owned()).collect(),
             removed: Vec::new(),
             binary: false,
         }
@@ -374,11 +448,11 @@ mod tests {
         )
     }
 
-    fn edit(file: &str, start: u32, added: u32) -> EventKind {
+    fn edit(file: &str, start: u32, lines: &[&str]) -> EventKind {
         let change = Change {
             start,
             removed: 0,
-            added,
+            added: u32::try_from(lines.len()).unwrap(),
         };
         EventKind::Edit {
             file: file.into(),
@@ -386,32 +460,46 @@ mod tests {
             change: Some(change),
             tool: "Edit".into(),
             via: None,
-            line_hashes: None,
+            line_hashes: Some(crate::record::line_hashes(lines)),
             removed_hashes: None,
         }
     }
 
+    fn run(class: CommandClass, cmd: &str, exit: i32) -> EventKind {
+        EventKind::Command {
+            classification: class,
+            exit_code: Some(exit),
+            command: cmd.into(),
+            outcome: None,
+            tests: None,
+            scope: None,
+        }
+    }
+
+    const A1: [&str; 3] = ["fn alpha_one() {", "    compute_alpha()", "}"];
+    const A2: [&str; 2] = ["fn alpha_two() -> u8 {", "    second_value() }"];
+    const B: [&str; 1] = ["let separator = config.separator();"];
+    const C: [&str; 1] = ["pub const HUMAN_WRITTEN: u32 = 1;"];
+    const D: [&str; 1] = ["validate_input(&request)?;"];
+
     fn sample(max_flagged: usize) -> Report {
         let hunks = vec![
-            hunk("src/a.rs", 1, 3),
-            hunk("src/a.rs", 20, 2),
-            hunk("src/b.rs", 5, 1),
-            hunk("src/c.rs", 1, 1),
+            hunk("src/a.rs", 1, &A1),
+            hunk("src/a.rs", 20, &A2),
+            hunk("src/b.rs", 5, &B),
+            hunk("src/c.rs", 1, &C),
+            hunk("src/d.rs", 3, &D),
         ];
         let sessions = vec![vec![
-            event(0, edit("src/a.rs", 1, 3)),
-            event(1, edit("src/b.rs", 5, 1)),
+            event(0, edit("src/a.rs", 1, &A1)),
+            event(1, edit("src/b.rs", 5, &B)),
+            event(2, edit("src/d.rs", 3, &D)),
+            event(3, run(CommandClass::Test, "cargo test", 0)),
+            event(4, edit("src/d.rs", 3, &D)),
+            event(5, run(CommandClass::Build, "cargo build", 0)),
+            event(6, edit("src/a.rs", 20, &A2)),
             event(
-                2,
-                EventKind::Command {
-                    classification: CommandClass::Test,
-                    exit_code: Some(0),
-                    command: "cargo test".into(),
-                },
-            ),
-            event(3, edit("src/a.rs", 20, 2)),
-            event(
-                4,
+                7,
                 EventKind::Assumption {
                     file: "src/b.rs".into(),
                     lines: Some(LineRange::new(5, 5)),
@@ -428,8 +516,9 @@ mod tests {
             sessions,
             skipped_lines: 0,
             config: &config,
-            classifier: &V0Rules,
+            classifier: &DefaultRules,
             history: &NullHistoryStore,
+            packages: &NoPackages,
             commit_agent: &no_commit_agent,
         })
     }
@@ -437,9 +526,16 @@ mod tests {
     #[test]
     fn counts_and_orders_sections() {
         let report = sample(10);
-        assert_eq!(report.summary.sections, 3);
-        assert_eq!(report.summary.human, 1);
-        assert_eq!(report.summary.review_closely, 2);
+        let s = &report.summary;
+        assert_eq!(s.sections, 4);
+        assert_eq!(s.human, 1);
+        assert_eq!(
+            (s.guessed, s.unverified, s.compiled, s.tested),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(s.review_closely, 2);
+        assert_eq!(s.lines.agent, 7);
+        assert_eq!(s.lines.tested, 3);
         let flagged: Vec<_> = report
             .flagged
             .iter()
@@ -452,7 +548,15 @@ mod tests {
                 ("src/a.rs", Status::Unverified)
             ]
         );
-        assert_eq!(report.skim.len(), 1);
+        let skim: Vec<_> = report
+            .skim
+            .iter()
+            .map(|s| (s.file.as_str(), s.status))
+            .collect();
+        assert_eq!(
+            skim,
+            vec![("src/a.rs", Status::Tested), ("src/d.rs", Status::Compiled)]
+        );
         assert_eq!(report.track_record.message, "No track record yet.");
     }
 
@@ -460,9 +564,10 @@ mod tests {
     fn markdown_starts_with_marker_and_escapes_cells() {
         let md = sample(10).to_markdown();
         assert!(md.starts_with(REPORT_MARKER));
-        assert!(md.contains("**Review 2 of 3 sections closely, skim the rest.**"));
+        assert!(md.contains("**Review 2 of 4 sections closely, skim the rest.**"));
         assert!(md.contains("Assumed: the \\| separator is never escaped"));
-        assert!(md.contains("<summary>1 section to skim</summary>"));
+        assert!(md.contains("<summary>2 sections to skim</summary>"));
+        assert!(md.contains("compiled, only built after the last edit: `cargo build` passed"));
     }
 
     #[test]
@@ -472,8 +577,8 @@ mod tests {
         assert_eq!(report.over_cap.len(), 1);
         assert_eq!(report.flagged[0].status, Status::Guessed);
         let md = report.to_markdown();
-        assert!(md.contains("**Review 1 of 3 sections closely"));
-        assert!(md.contains("1 more section also lacked verification"));
+        assert!(md.contains("**Review 1 of 4 sections closely"));
+        assert!(md.contains("1 more section to review closely"));
     }
 
     #[test]
@@ -483,8 +588,10 @@ mod tests {
         let back: Report = serde_json::from_str(&json).unwrap();
         assert_eq!(back, report);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["schema_version"], 2);
         assert_eq!(v["flagged"][0]["status"], "guessed");
-        assert_eq!(v["summary"]["sections"], 3);
+        assert_eq!(v["summary"]["sections"], 4);
+        assert_eq!(v["skim"][0]["evidence"]["run"]["command"], "cargo test");
     }
 
     #[test]
@@ -497,8 +604,9 @@ mod tests {
             sessions: Vec::new(),
             skipped_lines: 0,
             config: &config,
-            classifier: &V0Rules,
+            classifier: &DefaultRules,
             history: &NullHistoryStore,
+            packages: &NoPackages,
             commit_agent: &no_commit_agent,
         });
         assert!(report.to_markdown().contains("No agent-written sections"));

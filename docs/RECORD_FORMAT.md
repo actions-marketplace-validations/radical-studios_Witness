@@ -117,6 +117,9 @@ How capture derives the range, most precise first:
 | `classification` | string           | `test`, `build`, `lint` or `other`, from the patterns in `witness.toml`. |
 | `exit_code`      | integer or `null`| `null` when the exit status can't be attributed to the classified command: background commands, interrupted commands, or when the classified part is followed by `\|\|`, `;`, `&`, or by `\|` without an earlier `set -o pipefail` (as in `cargo test \| tail`). |
 | `command`        | string           | Command text with secrets redacted, then truncated to 200 characters. |
+| `outcome`        | string, optional | `passed` or `failed` for `test`, `build` and `lint` commands: from `exit_code` when it is attributable, else from the runner's summary in the output (read in memory, never stored). Absent when unknown. |
+| `tests`          | object, optional | `{"passed": n, "failed": n, "skipped": n}` from the runner's summary; each count is optional. |
+| `scope`          | object, optional | What the run covers, from its command line: `cwd` (repo-relative working directory), `packages` (e.g. `cargo -p`, npm workspaces), `paths` (directories: go packages, `--manifest-path`, gradle/maven modules), `filtered` (`true` when only some tests ran). Absent for the whole repository. |
 
 Exit status comes from the agent:
 
@@ -181,7 +184,7 @@ Written by the `SessionEnd` hook. Marks the log as complete.
 {"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:37:00.120Z","agent":"claude-code","kind":"read","file":"src/parse.rs"}
 {"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:37:04.512Z","agent":"claude-code","turn":"c05f","kind":"edit","file":"src/parse.rs","lines":{"start":12,"end":18},"change":{"start":12,"removed":3,"added":7},"tool":"Edit","via":"patch","line_hashes":["1d5f0a3b9c","8e21c4f077","c3a9e5d012","4b7f81a6e3","f02d9c3b58","6a1e7d4c90","b5c08f2e71"],"removed_hashes":["9f3c2a1e88","07d4b6c5a2","e8a1f3920d"]}
 {"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:37:09.001Z","agent":"claude-code","kind":"assumption","file":"src/parse.rs","lines":{"start":14,"end":15},"text":"the upstream API returns timestamps in UTC"}
-{"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:37:30.774Z","agent":"claude-code","kind":"command","classification":"test","exit_code":0,"command":"cargo test -p parser"}
+{"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:37:30.774Z","agent":"claude-code","kind":"command","classification":"test","exit_code":0,"command":"cargo test -p parser","outcome":"passed","tests":{"passed":42,"failed":0,"skipped":1},"scope":{"packages":["parser"]}}
 {"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:40:00.000Z","agent":"claude-code","kind":"session_end","reason":"other"}
 ```
 

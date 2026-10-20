@@ -5,6 +5,7 @@ use time::macros::datetime;
 use super::*;
 use crate::config::Config;
 use crate::record::{Change, CommandClass, EditVia, Event, EventKind};
+use crate::testsum::{RunOutcome, TestCounts};
 
 const ROOT: &str = "/home/user/my-project";
 
@@ -52,29 +53,11 @@ impl<'a> Run<'a> {
         let input = parse_hook(json, self.agent, self.event_arg).unwrap();
         events_for(&input, &ctx, &read, self.observed.as_ref())
     }
-    /// Record kinds, with line hashes left out (see `edits_carry_line_hashes`).
+    /// Record kinds, stripped (see [`strip`]).
     fn kinds(&self, json: &str) -> Vec<EventKind> {
         self.events(json)
             .into_iter()
-            .map(|e| match e.kind {
-                EventKind::Edit {
-                    file,
-                    lines,
-                    change,
-                    tool,
-                    via,
-                    ..
-                } => EventKind::Edit {
-                    file,
-                    lines,
-                    change,
-                    tool,
-                    via,
-                    line_hashes: None,
-                    removed_hashes: None,
-                },
-                other => other,
-            })
+            .map(|e| strip(e.kind))
             .collect()
     }
 
@@ -90,6 +73,44 @@ impl<'a> Run<'a> {
                 _ => None,
             })
             .collect()
+    }
+}
+
+/// A record kind with line hashes, test counts and scopes left out (see
+/// `edits_carry_line_hashes` and `commands_carry_results_and_scope`).
+fn strip(kind: EventKind) -> EventKind {
+    match kind {
+        EventKind::Edit {
+            file,
+            lines,
+            change,
+            tool,
+            via,
+            ..
+        } => EventKind::Edit {
+            file,
+            lines,
+            change,
+            tool,
+            via,
+            line_hashes: None,
+            removed_hashes: None,
+        },
+        EventKind::Command {
+            classification,
+            exit_code,
+            command,
+            outcome,
+            ..
+        } => EventKind::Command {
+            classification,
+            exit_code,
+            command,
+            outcome,
+            tests: None,
+            scope: None,
+        },
+        other => other,
     }
 }
 
@@ -134,11 +155,31 @@ fn edit(file: &str, start: u32, removed: u32, added: u32, tool: &str, via: EditV
     }
 }
 
+/// A command whose outcome follows from its exit code.
 fn command(class: CommandClass, exit: Option<i32>, text: &str) -> EventKind {
+    let outcome = exit.filter(|_| class != CommandClass::Other).map(|c| {
+        if c == 0 {
+            RunOutcome::Passed
+        } else {
+            RunOutcome::Failed
+        }
+    });
+    command_with(class, exit, text, outcome)
+}
+
+fn command_with(
+    class: CommandClass,
+    exit: Option<i32>,
+    text: &str,
+    outcome: Option<RunOutcome>,
+) -> EventKind {
     EventKind::Command {
         classification: class,
         exit_code: exit,
         command: text.into(),
+        outcome,
+        tests: None,
+        scope: None,
     }
 }
 
@@ -530,7 +571,7 @@ fn codex_payloads() {
     assert_eq!(events[0].turn.as_deref(), Some("turn-3"));
     assert_eq!(events[0].model.as_deref(), Some("gpt-5-codex"));
     assert_eq!(
-        events[0].kind,
+        strip(events[0].kind.clone()),
         command(CommandClass::Test, Some(101), "cargo test")
     );
 
@@ -591,10 +632,13 @@ fn copilot_camel_case_payloads() {
     let ok = run("post_tool_use_bash", "postToolUse");
     assert_eq!(ok[0].agent, "copilot");
     assert_eq!(ok[0].session_id, "c0p1l07-5e55-4a1b-9c2d-0e1f2a3b4c5d");
-    assert_eq!(ok[0].kind, command(CommandClass::Test, Some(0), "npm test"));
+    assert_eq!(
+        strip(ok[0].kind.clone()),
+        command(CommandClass::Test, Some(0), "npm test")
+    );
     let failed = run("post_tool_use_failure_bash", "post-tool-use-failure");
     assert_eq!(
-        failed[0].kind,
+        strip(failed[0].kind.clone()),
         command(CommandClass::Test, Some(1), "npm test")
     );
     // Without an exit marker in the output, success is not assumed.
@@ -604,7 +648,12 @@ fn copilot_camel_case_payloads() {
         Run::new()
             .agent(Some("copilot"), "postToolUse")
             .kinds(&unmarked),
-        vec![command(CommandClass::Test, None, "npm test")]
+        vec![command_with(
+            CommandClass::Test,
+            None,
+            "npm test",
+            Some(RunOutcome::Passed)
+        )]
     );
     let stop = input(
         &fixture("copilot/agent_stop.json"),
@@ -663,8 +712,13 @@ fn cursor_payloads() {
     assert_eq!(events[0].session_id, "cur-2f9a");
     assert_eq!(events[0].turn.as_deref(), Some("gen-71c3"));
     assert_eq!(
-        events[0].kind,
-        command(CommandClass::Test, None, "pytest -q")
+        strip(events[0].kind.clone()),
+        command_with(
+            CommandClass::Test,
+            None,
+            "pytest -q",
+            Some(RunOutcome::Passed)
+        )
     );
     let kinds = Run::new()
         .agent(None, "")
@@ -686,7 +740,7 @@ fn gemini_payloads() {
         .events(&fixture("gemini-cli/after_tool_shell.json"));
     assert_eq!(events[0].agent, "gemini-cli");
     assert_eq!(
-        events[0].kind,
+        strip(events[0].kind.clone()),
         command(CommandClass::Test, Some(0), "go test ./...")
     );
     let pre = input(&fixture("gemini-cli/before_tool_replace.json"), None, "");
@@ -705,8 +759,8 @@ fn generic_payloads() {
     assert_eq!(events[0].agent, "my-agent");
     assert_eq!(events[0].turn.as_deref(), Some("t1"));
     assert_eq!(
-        events[0].kind,
-        command(CommandClass::Other, Some(2), "make test")
+        strip(events[0].kind.clone()),
+        command(CommandClass::Test, Some(2), "make test")
     );
     assert_eq!(
         Run::new()
@@ -755,6 +809,54 @@ fn edits_carry_line_hashes() {
         })
         .hashes(&json);
     assert_eq!(observed, vec![(hashed(&["new"]), hashed(&["old"]))]);
+}
+
+#[test]
+fn commands_carry_results_and_scope() {
+    // Codex: exit 101 and the cargo summary's counts.
+    let events = Run::new()
+        .agent(None, "")
+        .events(&fixture("codex/post_tool_use_bash.json"));
+    let EventKind::Command { tests, scope, .. } = &events[0].kind else {
+        panic!("not a command");
+    };
+    assert_eq!(
+        *tests,
+        Some(TestCounts {
+            passed: Some(2),
+            failed: Some(1),
+            skipped: Some(0)
+        })
+    );
+    assert_eq!(*scope, None);
+
+    // A piped run: the exit code is not the test's, the summary is.
+    let mut v: Value = serde_json::from_str(&fixture("post_tool_use_bash.json")).unwrap();
+    v["tool_input"]["command"] = "cd crates/core && cargo test -p core 2>&1 | tail -3".into();
+    v["tool_response"]["stdout"] =
+        "test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured\n".into();
+    let events = Run::new().events(&v.to_string());
+    let EventKind::Command {
+        exit_code,
+        outcome,
+        scope,
+        ..
+    } = &events[0].kind
+    else {
+        panic!("not a command");
+    };
+    assert_eq!(*exit_code, None);
+    assert_eq!(*outcome, Some(RunOutcome::Failed));
+    let scope = scope.as_ref().unwrap();
+    assert_eq!(scope.cwd.as_deref(), Some("crates/core"));
+    assert_eq!(scope.packages, vec!["core"]);
+
+    // Other commands carry no outcome.
+    let ls = fixture("post_tool_use_bash.json").replace("npm test", "ls");
+    assert!(matches!(
+        Run::new().events(&ls)[0].kind,
+        EventKind::Command { outcome: None, .. }
+    ));
 }
 
 #[test]

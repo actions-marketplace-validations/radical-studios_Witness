@@ -26,6 +26,10 @@ pub struct Segment {
     pub deletion: bool,
     /// The added lines in this segment.
     pub added: Vec<String>,
+    /// The hunk's removed lines, on its first segment.
+    pub removed: Vec<String>,
+    /// Index of the hunk this segment comes from.
+    pub hunk: usize,
     /// Timeline positions of the agent edits that wrote these lines; empty
     /// when no agent edit did.
     pub edits: Vec<usize>,
@@ -95,11 +99,16 @@ pub fn attribute(hunks: &[Hunk], timeline: &Timeline) -> Vec<Segment> {
     let none = Vec::new();
     hunks
         .iter()
-        .flat_map(|hunk| {
+        .enumerate()
+        .flat_map(|(i, hunk)| {
             let edits = by_file.get(hunk.file.as_str()).unwrap_or(&none);
             let mut segments = split_hunk(hunk, edits);
             for seg in &mut segments {
+                seg.hunk = i;
                 seg.assumptions = assumptions_for(seg, timeline);
+            }
+            if let Some(first) = segments.first_mut() {
+                first.removed.clone_from(&hunk.removed);
             }
             segments
         })
@@ -112,6 +121,8 @@ fn split_hunk(hunk: &Hunk, edits: &[EditRef]) -> Vec<Segment> {
         span: hunk.span(),
         deletion: hunk.is_pure_deletion(),
         added: hunk.added.clone(),
+        removed: Vec::new(),
+        hunk: 0,
         edits,
         assumptions: Vec::new(),
     };
@@ -154,6 +165,8 @@ fn split_hunk(hunk: &Hunk, edits: &[EditRef]) -> Vec<Segment> {
             span: Some(LineRange::new(start, end)),
             deletion: false,
             added: hunk.added[i..j].to_vec(),
+            removed: Vec::new(),
+            hunk: 0,
             edits: seg_edits,
             assumptions: Vec::new(),
         });

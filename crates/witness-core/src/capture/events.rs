@@ -4,7 +4,9 @@ use std::path::Path;
 
 use crate::command;
 use crate::config::is_witness_path;
-use crate::record::{Change, EditVia, Event, EventKind, line_hash, line_hashes};
+use crate::record::{Change, CommandClass, EditVia, Event, EventKind, line_hash, line_hashes};
+use crate::scope;
+use crate::testsum::{self, RunOutcome};
 
 use super::{
     CaptureContext, Exit, FileEdit, HookEvent, HookInput, Observed, PatchHunk, Phase, ShellCall,
@@ -52,7 +54,7 @@ fn tool_events(
     let succeeded = call.phase == Phase::Post;
     let mut out = Vec::new();
     match &call.action {
-        ToolAction::Shell(shell) => out.push(command_event(ctx, shell)),
+        ToolAction::Shell(shell) => out.push(command_event(input, ctx, shell)),
         ToolAction::Read(files) if succeeded => {
             for file in files {
                 if let Some((rel, _)) = resolve(input, ctx, Some(file))
@@ -79,20 +81,42 @@ fn tool_events(
     out
 }
 
-fn command_event(ctx: &CaptureContext<'_>, shell: &ShellCall) -> EventKind {
+fn command_event(input: &HookInput, ctx: &CaptureContext<'_>, shell: &ShellCall) -> EventKind {
     let verdict = command::classify(ctx.config, &shell.command);
-    let exit_code = if shell.background || shell.interrupted || !verdict.exit_attributable {
-        None
-    } else {
-        match shell.exit {
-            Exit::Code(code) => Some(code),
-            Exit::Failed | Exit::Unknown => None,
-        }
+    let attributable = !shell.background && !shell.interrupted && verdict.exit_attributable;
+    let exit_code = match shell.exit {
+        Exit::Code(code) if attributable => Some(code),
+        _ => None,
     };
+    let checks = verdict.class != CommandClass::Other;
+    let summary = shell
+        .output
+        .as_deref()
+        .filter(|_| checks && !shell.interrupted)
+        .and_then(testsum::parse);
+    let outcome = match shell.exit {
+        _ if !checks || shell.background || shell.interrupted => None,
+        Exit::Code(0) if attributable => Some(RunOutcome::Passed),
+        Exit::Code(_) | Exit::Failed if attributable => Some(RunOutcome::Failed),
+        _ => summary.and_then(|s| s.outcome),
+    };
+    let scope = checks
+        .then(|| {
+            let cwd = shell
+                .cwd
+                .as_deref()
+                .or(input.cwd.as_deref())
+                .and_then(|dir| resolve(input, ctx, Some(dir)).map(|(rel, _)| rel));
+            scope::parse(&verdict.simple, cwd.as_deref(), &verdict.cd)
+        })
+        .flatten();
     EventKind::Command {
         classification: verdict.class,
         exit_code,
         command: command::sanitize_command(&shell.command),
+        outcome,
+        tests: summary.map(|s| s.tests).filter(|t| !t.is_empty()),
+        scope,
     }
 }
 

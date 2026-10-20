@@ -1,6 +1,6 @@
 //! `witness report` and `witness post`: git + session logs → report.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -10,7 +10,8 @@ use witness_core::history::NullHistoryStore;
 use witness_core::provenance::Segment;
 use witness_core::record::parse_log;
 use witness_core::report::{self, ReportInput};
-use witness_core::{Config, Hunk, Report, V0Rules};
+use witness_core::scope::{self, Packages};
+use witness_core::{Config, DefaultRules, Hunk, Report};
 use witness_git::{Git, GitCli};
 use witness_platform::{DryRun, Platform, PostTarget, RenderedReport, github, gitlab};
 
@@ -125,6 +126,13 @@ pub fn compute(git: &dyn Git, req: &Request<'_>, config: &Config) -> Result<Repo
         recorded,
         commits: RefCell::new(HashMap::new()),
     };
+    let packages = PackageIndex {
+        git,
+        head,
+        prefix,
+        files: OnceCell::new(),
+        names: OnceCell::new(),
+    };
     Ok(report::build(ReportInput {
         base,
         head,
@@ -132,10 +140,73 @@ pub fn compute(git: &dyn Git, req: &Request<'_>, config: &Config) -> Result<Repo
         sessions,
         skipped_lines: skipped,
         config,
-        classifier: &V0Rules,
+        classifier: &DefaultRules,
         history: &NullHistoryStore,
+        packages: &packages,
         commit_agent: &|segment| commit_agent.for_segment(segment),
     }))
+}
+
+/// Package manifests at head, read on first use.
+struct PackageIndex<'a> {
+    git: &'a dyn Git,
+    head: &'a str,
+    prefix: &'a str,
+    /// Manifest paths at head, relative to the Witness root.
+    files: OnceCell<Vec<String>>,
+    /// Package name → directory.
+    names: OnceCell<HashMap<String, String>>,
+}
+
+impl PackageIndex<'_> {
+    fn manifests(&self) -> &[String] {
+        self.files.get_or_init(|| {
+            let dir = if self.prefix.is_empty() {
+                ".".to_owned()
+            } else {
+                self.prefix.trim_end_matches('/').to_owned()
+            };
+            self.git
+                .list_files(self.head, &dir)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|p| p.strip_prefix(self.prefix).map(str::to_owned))
+                .filter(|p| {
+                    let name = p.rsplit('/').next().unwrap_or(p);
+                    scope::MANIFESTS.contains(&name)
+                })
+                .collect()
+        })
+    }
+}
+
+impl Packages for PackageIndex<'_> {
+    fn dir_of(&self, name: &str) -> Option<String> {
+        let names = self.names.get_or_init(|| {
+            let mut names = HashMap::new();
+            for manifest in self.manifests() {
+                let path = format!("{}{manifest}", self.prefix);
+                if let Ok(Some(text)) = self.git.show_file(self.head, &path)
+                    && let Some(package) = scope::package_name(manifest, &text)
+                {
+                    let dir = manifest.rsplit_once('/').map_or("", |(d, _)| d);
+                    names.entry(package).or_insert_with(|| dir.to_owned());
+                }
+            }
+            names
+        });
+        names.get(name).cloned().or_else(|| {
+            // npm workspaces are often named by path (`-w packages/web`).
+            self.is_package_root(name).then(|| name.to_owned())
+        })
+    }
+
+    fn is_package_root(&self, dir: &str) -> bool {
+        self.manifests().iter().any(|m| {
+            m.rsplit_once('/')
+                .is_some_and(|(d, _)| d == dir.trim_end_matches('/'))
+        })
+    }
 }
 
 /// Finds lines committed by an agent that left no record on this branch.
@@ -345,7 +416,7 @@ diff --git a/.witness/sessions/s.jsonl b/.witness/sessions/s.jsonl\n--- /dev/nul
         assert_eq!(report.summary.sections, 1);
         assert_eq!(report.summary.human, 0);
         assert_eq!(report.summary.skipped_lines, 1);
-        assert_eq!(report.skim[0].status, Status::Checked);
+        assert_eq!(report.skim[0].status, Status::Tested);
     }
 
     #[test]

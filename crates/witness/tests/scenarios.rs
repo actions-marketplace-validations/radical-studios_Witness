@@ -132,7 +132,7 @@ fn codex_session_end_to_end() {
 
     let report = repo.report_json("main", "HEAD");
     assert_eq!(report["summary"]["sections"], 1, "{report:#}");
-    assert_eq!(report["skim"][0]["status"], "checked");
+    assert_eq!(report["skim"][0]["status"], "tested");
     assert_eq!(report["skim"][0]["agent"], "codex");
     let log = repo.read(".witness/sessions/cx-1.jsonl");
     assert!(log.contains(r#""via":"preimage""#), "{log}");
@@ -250,7 +250,7 @@ fn record_writes_manual_events() {
     repo.commit_all("feature");
 
     let report = repo.report_json("main", "HEAD");
-    assert_eq!(report["skim"][0]["status"], "checked", "{report:#}");
+    assert_eq!(report["skim"][0]["status"], "tested", "{report:#}");
     assert_eq!(report["skim"][0]["agent"], "aider");
 }
 
@@ -317,7 +317,7 @@ fn attribution_survives_a_rebase() {
     let report = repo.report_json("main", "HEAD");
     assert_eq!(report["summary"]["sections"], 1, "{report:#}");
     assert_eq!(report["summary"]["human"], 0);
-    assert_eq!(report["skim"][0]["status"], "checked");
+    assert_eq!(report["skim"][0]["status"], "tested");
     assert_eq!(report["skim"][0]["lines"], "9-10");
 }
 
@@ -390,4 +390,106 @@ fn agent_commits_without_records_are_unrecorded() {
     repo.commit_all("add the session log");
     let report = repo.report_json("main", "HEAD");
     assert_eq!(report["summary"]["unrecorded"], 0, "{report:#}");
+}
+
+/// `cargo test | tail` hides cargo's exit code, but its summary line still
+/// says the tests failed.
+#[test]
+fn piped_test_runs_are_judged_by_their_summary() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", LIB);
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    let agent = repo.claude("s");
+    agent.read("src/lib.rs");
+    agent.edit("src/lib.rs", "    2\n", "    compute_beta_value()\n");
+    agent.bash_output(
+        "cargo test 2>&1 | tail -3",
+        "test tests::beta ... FAILED\n\ntest result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+    );
+    repo.commit_all("feature");
+
+    let report = repo.report_json("main", "HEAD");
+    assert_eq!(report["summary"]["failing"], 1, "{report:#}");
+    assert_eq!(report["flagged"][0]["status"], "failing");
+    assert_eq!(
+        report["flagged"][0]["reason"],
+        "`cargo test 2>&1 | tail -3` failed (1 failed) after the last edit"
+    );
+}
+
+/// `cargo test -p a` says nothing about crate `b`.
+#[test]
+fn scoped_runs_cover_only_their_packages() {
+    let repo = TestRepo::new();
+    repo.write("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
+    repo.write("crates/a/Cargo.toml", "[package]\nname = \"a\"\n");
+    repo.write("crates/a/src/lib.rs", LIB);
+    repo.write("crates/b/Cargo.toml", "[package]\nname = \"b\"\n");
+    repo.write("crates/b/src/lib.rs", LIB);
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    let agent = repo.claude("s");
+    agent.read("crates/a/src/lib.rs");
+    agent.read("crates/b/src/lib.rs");
+    agent.edit(
+        "crates/a/src/lib.rs",
+        "    2\n",
+        "    compute_in_crate_a()\n",
+    );
+    agent.edit(
+        "crates/b/src/lib.rs",
+        "    2\n",
+        "    compute_in_crate_b()\n",
+    );
+    agent.bash("cargo test -p a");
+    repo.commit_all("feature");
+
+    let report = repo.report_json("main", "HEAD");
+    assert_eq!(
+        report["skim"][0]["file"], "crates/a/src/lib.rs",
+        "{report:#}"
+    );
+    assert_eq!(report["skim"][0]["status"], "tested");
+    assert_eq!(report["flagged"][0]["file"], "crates/b/src/lib.rs");
+    assert_eq!(report["flagged"][0]["status"], "unverified");
+    let reason = report["flagged"][0]["reason"].as_str().unwrap();
+    assert!(reason.ends_with("covers only `crates/a`"), "{reason}");
+}
+
+/// A test edited right after it failed is put up for close review even
+/// though the tests then passed.
+#[test]
+fn tests_changed_after_failing_are_escalated() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", LIB);
+    repo.write(
+        "tests/beta.rs",
+        "#[test]\nfn beta_is_two() {\n    assert_eq!(beta(), 2);\n}\n",
+    );
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    let agent = repo.claude("s");
+    agent.read("src/lib.rs");
+    agent.read("tests/beta.rs");
+    agent.edit("src/lib.rs", "    2\n", "    compute_beta_value()\n");
+    agent.bash_fail("cargo test", 101);
+    agent.edit(
+        "tests/beta.rs",
+        "    assert_eq!(beta(), 2);\n",
+        "    assert!(beta() > 0);\n",
+    );
+    agent.bash("cargo test");
+    repo.commit_all("feature");
+
+    let report = repo.report_json("main", "HEAD");
+    let flagged = &report["flagged"][0];
+    assert_eq!(flagged["file"], "tests/beta.rs", "{report:#}");
+    assert_eq!(flagged["status"], "tested");
+    assert_eq!(flagged["signals"][0]["kind"], "test-changed-after-failure");
+    let md = repo.report_markdown("main", "HEAD");
+    assert!(md.contains("changed after `cargo test` failed"), "{md}");
 }

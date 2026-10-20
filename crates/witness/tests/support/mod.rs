@@ -248,6 +248,17 @@ impl ClaudeSession<'_> {
         self.hook("post-tool-use", &post);
     }
 
+    /// A Bash command that exited 0 and printed `stdout`.
+    pub fn bash_output(&self, command: &str, stdout: &str) {
+        let json = self.payload(
+            "PostToolUse",
+            "Bash",
+            json!({"command": command, "description": "run"}),
+            json!({"stdout": stdout, "stderr": "", "interrupted": false, "isImage": false}),
+        );
+        self.hook("post-tool-use", &json);
+    }
+
     /// A Bash command that exited 0.
     pub fn bash(&self, command: &str) {
         let json = self.payload(

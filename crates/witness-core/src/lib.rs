@@ -10,9 +10,12 @@ pub mod hunk;
 pub mod provenance;
 pub mod record;
 pub mod report;
+pub mod scope;
+pub mod signals;
+pub mod testsum;
 pub mod timeline;
 
-pub use classify::{Classifier, Status, V0Rules};
+pub use classify::{Classifier, DefaultRules, Status};
 pub use config::Config;
 pub use hunk::Hunk;
 pub use record::{Event, EventKind, LineRange};

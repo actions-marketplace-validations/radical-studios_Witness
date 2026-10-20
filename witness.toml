@@ -3,6 +3,31 @@
 [report]
 # Cap on how many sections the report flags for close review.
 max_flagged = 10
+# Statuses to review closely: failing, guessed, unrecorded, unverified,
+# compiled, tested. The rest are listed to skim.
+close = ["failing", "guessed", "unrecorded", "unverified"]
+# Signals that put a section up for close review whatever its status:
+# test-changed-after-failure, assertions-removed, high-risk-area, blind-edit,
+# thrash, filtered-test-run, human-modified.
+escalate = ["test-changed-after-failure", "assertions-removed", "high-risk-area"]
+
+# Globs for test files, for test-specific signals.
+[tests]
+paths = [
+  '**/tests/**',
+  '**/test/**',
+  '**/__tests__/**',
+  '**/spec/**',
+  '**/*_test.go',
+  '**/test_*.py',
+  '**/*_test.py',
+  '**/*.test.*',
+  '**/*.spec.*',
+  '**/*_spec.rb',
+  '**/*Test.java',
+  '**/*Tests.cs',
+  '**/src/test/**',
+]
 
 [capture]
 # Snapshot the working tree around shell commands (and tools that report no
@@ -25,6 +50,20 @@ test = [
   '^go test\b',
   '^(\./)?gradlew?( \S+)* (\S*:)?(test|check)\b',
   '^(\./)?mvnw?( \S+)* (test|verify)\b',
+  '^make( \S+)* (test|check)\b',
+  '^just( \S+)* test\b',
+  '^(tox|nox)\b',
+  '^(bundle exec )?(rspec|rake (test|spec))\b',
+  '^dotnet test\b',
+  '^deno test\b',
+  '^mix test\b',
+  '^(\./)?(vendor/bin/)?(phpunit|pest)\b',
+  '^ctest\b',
+  '^swift test\b',
+  '^flutter test\b',
+  '^sbt( \S+)* test\b',
+  '^bazel(isk)? test\b',
+  '^zig build test\b',
 ]
 build = [
   '^cargo (\+\S+ )?(build|check)\b',
@@ -33,6 +72,13 @@ build = [
   '^go build\b',
   '^(\./)?gradlew?( \S+)* (\S*:)?(build|assemble|compile\w*)\b',
   '^(\./)?mvnw?( \S+)* (compile|package|install)\b',
+  '^make\b',
+  '^dotnet build\b',
+  '^swift build\b',
+  '^bazel(isk)? build\b',
+  '^zig build\b',
+  '^mix compile\b',
+  '^(npx )?(vite|next|webpack) build\b',
 ]
 lint = [
   '^cargo (clippy|fmt)\b',
@@ -42,10 +88,29 @@ lint = [
   '^go vet\b',
   '^golangci-lint\b',
   '^gofmt\b',
+  '^(rubocop|shellcheck|hadolint|stylelint|swiftlint)\b',
+  '^dotnet format\b',
+  '^mix (format|credo)\b',
 ]
 
-# Areas group paths for the agent track record (not computed yet).
-# The first matching area wins; unmatched paths fall in "default".
+# Commits recognized as written by an agent. When a branch has no Witness
+# record from that agent, lines from its commits are flagged "unrecorded".
+# Each pattern is matched against the commit's author, committer and message.
+[attribution]
+agent_commits = [
+  { agent = "claude-code", pattern = '(?im)^co-authored-by:\s*claude\b' },
+  { agent = "copilot", pattern = '(?im)^co-authored-by:\s*copilot\b|copilot-swe-agent' },
+  { agent = "codex", pattern = '(?im)^co-authored-by:\s*(openai )?codex\b|chatgpt-codex' },
+  { agent = "cursor", pattern = '(?im)^co-authored-by:\s*cursor\b|cursoragent@cursor\.com' },
+  { agent = "gemini-cli", pattern = '(?im)^co-authored-by:\s*gemini\b' },
+  { agent = "aider", pattern = '(?im)^co-authored-by:\s*aider\b|\(aider\) <' },
+  { agent = "devin", pattern = '(?i)devin-ai-integration' },
+]
+
+# Areas group paths for the agent track record. The first matching area
+# wins; unmatched paths fall in "default". risk = "high" marks code where
+# mistakes are costly: agent sections there are reviewed closely.
 # [[areas]]
-# name = "core"
-# paths = ["src/core/**"]
+# name = "auth"
+# paths = ["src/auth/**"]
+# risk = "high"

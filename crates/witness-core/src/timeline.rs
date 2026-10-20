@@ -230,6 +230,9 @@ mod tests {
             classification: CommandClass::Test,
             exit_code: Some(0),
             command: "cargo test".into(),
+            outcome: None,
+            tests: None,
+            scope: None,
         };
         let timeline = Timeline::build(vec![
             vec![ev("b", 5, cmd)],
