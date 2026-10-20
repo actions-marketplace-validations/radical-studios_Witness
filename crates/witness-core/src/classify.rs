@@ -1,17 +1,20 @@
-//! v0 hunk classification rules. Kept in one module so they can be swapped.
+//! v0 classification rules. Kept in one module so they can be swapped.
 //!
-//! For a hunk at head, look at timeline events for the same file whose spans
-//! overlap it:
+//! For a segment at head (see [`crate::provenance`]), look at the agent
+//! edits that wrote it and the assumptions about it:
 //!
 //! - `guessed`: an assumption was recorded against it;
-//! - `human`: otherwise, no agent edit touched it (excluded from the count);
-//! - `checked`: a `test` or `build` command exited 0 after the hunk's last
-//!   edit, and no `test` or `build` failed after that pass;
-//! - `unverified`: edited by the agent, none of the above.
+//! - `human`: otherwise, no agent edit wrote it (excluded from the count);
+//! - `checked`: a `test` or `build` command exited 0 after the segment's
+//!   last edit, and no `test` or `build` failed after that pass;
+//! - `unverified`: written by the agent, none of the above.
+//!
+//! `unrecorded` is decided by the report from commit metadata: human-looking
+//! lines from a commit attributed to an agent.
 
 use serde::{Deserialize, Serialize};
 
-use crate::hunk::{Hunk, spans_overlap};
+use crate::provenance::Segment;
 use crate::record::{EventKind, MAX_COMMAND_CHARS, truncate_chars};
 use crate::timeline::{Placed, Timeline};
 
@@ -20,6 +23,8 @@ use crate::timeline::{Placed, Timeline};
 pub enum Status {
     Guessed,
     Unverified,
+    /// From a commit attributed to an agent, with no Witness record.
+    Unrecorded,
     Checked,
     Human,
 }
@@ -29,6 +34,7 @@ impl Status {
         match self {
             Status::Guessed => "guessed",
             Status::Unverified => "unverified",
+            Status::Unrecorded => "unrecorded",
             Status::Checked => "checked",
             Status::Human => "human",
         }
@@ -36,7 +42,10 @@ impl Status {
 
     /// Whether reviewers should look closely.
     pub fn is_flagged(&self) -> bool {
-        matches!(self, Status::Guessed | Status::Unverified)
+        matches!(
+            self,
+            Status::Guessed | Status::Unverified | Status::Unrecorded
+        )
     }
 }
 
@@ -52,7 +61,7 @@ pub struct Verdict {
 
 /// A swappable set of classification rules.
 pub trait Classifier {
-    fn classify(&self, hunk: &Hunk, timeline: &Timeline) -> Verdict;
+    fn classify(&self, segment: &Segment, timeline: &Timeline) -> Verdict;
 }
 
 /// The v0 rules described in the module docs.
@@ -62,23 +71,11 @@ pub struct V0Rules;
 const MAX_REASON_TEXT: usize = 120;
 
 impl Classifier for V0Rules {
-    fn classify(&self, hunk: &Hunk, timeline: &Timeline) -> Verdict {
-        let span = hunk.span();
-        let touches =
-            |p: &&Placed| p.file() == Some(hunk.file.as_str()) && spans_overlap(p.span, span);
-
-        let assumptions: Vec<&Placed> = timeline
-            .events
-            .iter()
-            .filter(|p| matches!(p.event.kind, EventKind::Assumption { .. }))
-            .filter(touches)
-            .collect();
-        let edits: Vec<&Placed> = timeline
-            .events
-            .iter()
-            .filter(|p| matches!(p.event.kind, EventKind::Edit { .. }))
-            .filter(touches)
-            .collect();
+    fn classify(&self, segment: &Segment, timeline: &Timeline) -> Verdict {
+        let placed = |idx: &usize| timeline.events.get(*idx);
+        let assumptions: Vec<&Placed> = segment.assumptions.iter().filter_map(placed).collect();
+        let mut edits: Vec<&Placed> = segment.edits.iter().filter_map(placed).collect();
+        edits.sort_by_key(|p| p.order);
         let agent = edits
             .last()
             .or(assumptions.last())
@@ -182,6 +179,7 @@ fn code_text(cmd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hunk::Hunk;
     use crate::record::{Change, CommandClass, Event, LineRange};
     use time::Duration;
     use time::macros::datetime;
@@ -227,6 +225,8 @@ mod tests {
                 change: Some(change),
                 tool: "Edit".into(),
                 via: None,
+                line_hashes: None,
+                removed_hashes: None,
             })
         }
         fn whole_file_edit(self, file: &str) -> Self {
@@ -236,6 +236,8 @@ mod tests {
                 change: None,
                 tool: "NotebookEdit".into(),
                 via: None,
+                line_hashes: None,
+                removed_hashes: None,
             })
         }
         fn run(self, class: CommandClass, cmd: &str, exit: Option<i32>) -> Self {
@@ -250,10 +252,13 @@ mod tests {
                 file: file.into(),
                 lines: lines.map(|(a, b)| LineRange::new(a, b)),
                 text: text.into(),
+                line_hashes: None,
             })
         }
         fn verdict(self, hunk: &Hunk) -> Verdict {
-            V0Rules.classify(hunk, &Timeline::build(vec![self.0]))
+            let timeline = Timeline::build(vec![self.0]);
+            let segments = crate::provenance::attribute(std::slice::from_ref(hunk), &timeline);
+            V0Rules.classify(&segments[0], &timeline)
         }
     }
 
@@ -412,6 +417,8 @@ mod tests {
                 change: Some(change),
                 tool: "Edit".into(),
                 via: None,
+                line_hashes: None,
+                removed_hashes: None,
             })
             .verdict(&hunk("a.rs", 7, 0));
         assert_eq!(v.status, Status::Unverified);

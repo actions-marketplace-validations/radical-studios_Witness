@@ -63,6 +63,11 @@ pub trait Git {
     fn log(&self, path: Option<&str>, max: usize) -> Result<Vec<CommitInfo>, GitError>;
     /// Which commit last changed each line of `range` in `path` at `rev`.
     fn blame(&self, rev: &str, path: &str, range: LineRange) -> Result<Vec<BlameLine>, GitError>;
+    /// A commit's `author <email>`, `committer <email>` and full message,
+    /// one after the other.
+    fn commit_text(&self, _sha: &str) -> Result<Option<String>, GitError> {
+        Ok(None)
+    }
 }
 
 /// Hunks changed on `head` since its merge base with `base`.
@@ -272,6 +277,14 @@ impl Git for GitCli {
         let lines = format!("{},{}", range.start, range.end);
         let out = self.run(&["blame", "--porcelain", "-L", &lines, rev, "--", path])?;
         Ok(parse_blame_porcelain(&out))
+    }
+
+    fn commit_text(&self, sha: &str) -> Result<Option<String>, GitError> {
+        let out = self.output(&["show", "-s", "--format=%an <%ae>%n%cn <%ce>%n%n%B", sha])?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
     }
 }
 

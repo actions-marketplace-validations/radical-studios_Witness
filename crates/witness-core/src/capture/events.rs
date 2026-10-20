@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::command;
 use crate::config::is_witness_path;
-use crate::record::{Change, EditVia, Event, EventKind};
+use crate::record::{Change, EditVia, Event, EventKind, line_hash, line_hashes};
 
 use super::{
     CaptureContext, Exit, FileEdit, HookEvent, HookInput, Observed, PatchHunk, Phase, ShellCall,
@@ -110,6 +110,9 @@ fn observed_events(call: &ToolCall, observed: &Observed) -> Vec<EventKind> {
                 change,
                 tool: call.tool.clone(),
                 via: Some(observed.via),
+                line_hashes: (!h.binary).then(|| line_hashes(&h.added)),
+                removed_hashes: (!h.binary && !h.removed.is_empty())
+                    .then(|| line_hashes(&h.removed)),
             }
         })
         .collect()
@@ -129,21 +132,33 @@ fn file_edit_events(
     if is_witness_path(&rel) {
         return Vec::new();
     }
-    let make = |change: Option<Change>, via: EditVia| EventKind::Edit {
-        file: rel.clone(),
-        lines: change.map(|c| c.new_range()),
-        change,
-        tool: call.tool.clone(),
-        via: Some(via),
+    let make = |change: Option<Change>,
+                via: EditVia,
+                added: Option<Vec<String>>,
+                removed: Option<Vec<String>>| {
+        EventKind::Edit {
+            file: rel.clone(),
+            lines: change.map(|c| c.new_range()),
+            change,
+            tool: call.tool.clone(),
+            via: Some(via),
+            line_hashes: added,
+            removed_hashes: removed.filter(|r| !r.is_empty()),
+        }
     };
 
     // 1. The agent's own patch of the edit.
-    let patched: Vec<Change> = file.patch.iter().filter_map(change_from_patch).collect();
+    let patched: Vec<EventKind> = file
+        .patch
+        .iter()
+        .filter_map(|hunk| {
+            let change = change_from_patch(hunk)?;
+            let (added, removed) = patch_lines(hunk);
+            Some(make(Some(change), EditVia::Patch, added, removed))
+        })
+        .collect();
     if !patched.is_empty() {
-        return patched
-            .into_iter()
-            .map(|c| make(Some(c), EditVia::Patch))
-            .collect();
+        return patched;
     }
 
     // 2. A newly created file covers all its lines.
@@ -157,7 +172,13 @@ fn file_edit_events(
                 removed: 0,
                 added,
             };
-            return vec![make(Some(change), EditVia::Content)];
+            let lines: Vec<&str> = content.lines().collect();
+            return vec![make(
+                Some(change),
+                EditVia::Content,
+                Some(line_hashes(&lines)),
+                None,
+            )];
         }
     }
 
@@ -169,20 +190,43 @@ fn file_edit_events(
         for (old, new) in &file.replacements {
             match locate(&content, old, new) {
                 Some(found) => changes.extend(found),
-                None => return vec![make(None, EditVia::Unknown)],
+                None => return vec![make(None, EditVia::Unknown, None, None)],
             }
         }
         // Ranges are in the final file's lines; replay expects them in
         // ascending order.
         changes.sort_by_key(|c| c.start);
         changes.dedup();
+        let file_lines: Vec<&str> = content.lines().collect();
         return changes
             .into_iter()
-            .map(|c| make(Some(c), EditVia::Locate))
+            .map(|c| {
+                // The whole lines the new text sits on, as they are now.
+                let from = c.start.saturating_sub(1) as usize;
+                let lines = file_lines
+                    .get(from..(from + c.added as usize).min(file_lines.len()))
+                    .unwrap_or_default();
+                make(Some(c), EditVia::Locate, Some(line_hashes(lines)), None)
+            })
             .collect();
     }
 
-    vec![make(None, EditVia::Unknown)]
+    vec![make(None, EditVia::Unknown, None, None)]
+}
+
+/// Hashes of the lines a patch hunk added and removed.
+fn patch_lines(hunk: &PatchHunk) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let Some(lines) = &hunk.lines else {
+        return (None, None);
+    };
+    let pick = |prefix: char| -> Vec<String> {
+        lines
+            .iter()
+            .filter_map(|l| l.strip_prefix(prefix))
+            .map(line_hash)
+            .collect()
+    };
+    (Some(pick('+')), Some(pick('-')))
 }
 
 /// Finds where `new` sits in `content`. Every occurrence is returned: with

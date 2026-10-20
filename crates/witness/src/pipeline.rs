@@ -1,11 +1,13 @@
 //! `witness report` and `witness post`: git + session logs → report.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use witness_core::history::NullHistoryStore;
+use witness_core::provenance::Segment;
 use witness_core::record::parse_log;
 use witness_core::report::{self, ReportInput};
 use witness_core::{Config, Hunk, Report, V0Rules};
@@ -114,6 +116,15 @@ pub fn compute(git: &dyn Git, req: &Request<'_>, config: &Config) -> Result<Repo
         }
     }
 
+    let recorded: HashSet<String> = sessions.iter().flatten().map(|e| e.agent.clone()).collect();
+    let commit_agent = CommitAgents {
+        git,
+        head,
+        prefix,
+        config,
+        recorded,
+        commits: RefCell::new(HashMap::new()),
+    };
     Ok(report::build(ReportInput {
         base,
         head,
@@ -123,7 +134,56 @@ pub fn compute(git: &dyn Git, req: &Request<'_>, config: &Config) -> Result<Repo
         config,
         classifier: &V0Rules,
         history: &NullHistoryStore,
+        commit_agent: &|segment| commit_agent.for_segment(segment),
     }))
+}
+
+/// Finds lines committed by an agent that left no record on this branch.
+struct CommitAgents<'a> {
+    git: &'a dyn Git,
+    head: &'a str,
+    prefix: &'a str,
+    config: &'a Config,
+    /// Agents with Witness records on this branch; their unrecorded lines
+    /// are trusted to be human.
+    recorded: HashSet<String>,
+    /// Commit → agent it is attributed to.
+    commits: RefCell<HashMap<String, Option<String>>>,
+}
+
+impl CommitAgents<'_> {
+    /// The agent every line of `segment` was committed by, when that agent
+    /// has no record on the branch.
+    fn for_segment(&self, segment: &Segment) -> Option<String> {
+        let span = segment.span.filter(|_| !segment.deletion)?;
+        let path = format!("{}{}", self.prefix, segment.file);
+        let blame = self.git.blame(self.head, &path, span).ok()?;
+        let mut agent: Option<String> = None;
+        for line in &blame {
+            let this = self.commit_agent(&line.commit)?;
+            match &agent {
+                Some(a) if *a != this => return None,
+                _ => agent = Some(this),
+            }
+        }
+        agent.filter(|a| !self.recorded.contains(a))
+    }
+
+    fn commit_agent(&self, sha: &str) -> Option<String> {
+        if let Some(known) = self.commits.borrow().get(sha) {
+            return known.clone();
+        }
+        let agent = self
+            .git
+            .commit_text(sha)
+            .ok()
+            .flatten()
+            .and_then(|text| self.config.agent_for_commit(&text).map(str::to_owned));
+        self.commits
+            .borrow_mut()
+            .insert(sha.to_owned(), agent.clone());
+        agent
+    }
 }
 
 /// Session log text written on this branch, keyed by path: for each log at

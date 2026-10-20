@@ -120,6 +120,19 @@ pub fn write_current_session(root: &Path, session_id: &str, agent: &str) -> Resu
     fs::write(&path, line).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Line hashes of `range` in `file` (repo-relative) as it is now, for
+/// events recorded by hand.
+pub fn range_hashes(root: &Path, file: &str, range: Option<LineRange>) -> Option<Vec<String>> {
+    let range = range?;
+    let text = fs::read_to_string(root.join(file)).ok()?;
+    let lines: Vec<&str> = text
+        .lines()
+        .skip(range.start as usize - 1)
+        .take((range.end - range.start + 1) as usize)
+        .collect();
+    (!lines.is_empty()).then(|| witness_core::record::line_hashes(&lines))
+}
+
 /// The session and agent to record a manual event (`witness assume`,
 /// `record`, `exec`) under: `session`, else `$WITNESS_SESSION_ID`, else the
 /// session the hooks saw last; the agent is `agent`, else that session's.

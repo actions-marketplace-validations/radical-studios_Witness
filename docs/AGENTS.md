@@ -49,8 +49,8 @@ built from each agent's documentation; please report payloads they misread.
   `restore`, ...) are not snapshotted: what they change isn't the agent's
   edit.
 
-Only paths, line ranges and redacted command text are stored; file
-contents, tool output and environment variables never are. See
+Only paths, line ranges, 40-bit line hashes and redacted command text are
+stored; file contents, tool output and environment variables never are. See
 [RECORD_FORMAT.md](RECORD_FORMAT.md).
 
 ## Per-agent notes

@@ -91,13 +91,15 @@ Other commands:
 
 ## How sections are classified
 
-Each hunk of `git diff base...head` is matched to the agent's recorded edits
-and assumptions by file and line range:
+Each line of `git diff base...head` is matched to the agent's recorded edits
+by content (a short hash of each line the agent wrote), so attribution
+survives rebases and later commits. Hunks are split where authors change:
 
 | Status | Meaning | Review |
 | --- | --- | --- |
 | guessed | the agent recorded an assumption about these lines | look closely |
 | unverified | the agent edited them, and no test or build passed afterwards | look closely |
+| unrecorded | committed by an agent (e.g. a `Co-authored-by: Claude` trailer) that left no record on the branch | look closely |
 | checked | a test or build passed after the last edit | skim |
 | human | no agent edit; not counted | n/a |
 
@@ -106,9 +108,10 @@ Defaults cover cargo, npm/pnpm/yarn/bun, pytest, go, gradle and maven.
 
 ## What is recorded
 
-File paths, line ranges, tool names, command text (secrets redacted,
-truncated to 200 characters), exit codes and the assumptions the agent
-states. Never tool output, file contents or environment variables. See
+File paths, line ranges, 40-bit hashes of the lines the agent wrote, tool
+names, command text (secrets redacted, truncated to 200 characters), exit
+codes and the assumptions the agent states. Never tool output, file contents
+or environment variables. See
 [docs/RECORD_FORMAT.md](docs/RECORD_FORMAT.md).
 
 ## Development

@@ -31,7 +31,56 @@ pub struct RawConfig {
     pub report: ReportConfig,
     pub capture: CaptureConfig,
     pub commands: CommandPatterns,
+    pub attribution: AttributionConfig,
     pub areas: Vec<AreaConfig>,
+}
+
+/// Recognizing commits made by agents that left no Witness record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AttributionConfig {
+    /// A commit whose author, committer or message matches `pattern` is
+    /// treated as written by `agent`. When the branch has no Witness record
+    /// from that agent, its lines are reported as `unrecorded`.
+    pub agent_commits: Vec<AgentCommit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentCommit {
+    pub agent: String,
+    /// Regex matched against `author <email>`, `committer <email>` and the
+    /// full commit message, one per line.
+    pub pattern: String,
+}
+
+impl Default for AttributionConfig {
+    fn default() -> Self {
+        let rule = |agent: &str, pattern: &str| AgentCommit {
+            agent: agent.to_owned(),
+            pattern: pattern.to_owned(),
+        };
+        Self {
+            agent_commits: vec![
+                rule("claude-code", r"(?im)^co-authored-by:\s*claude\b"),
+                rule(
+                    "copilot",
+                    r"(?im)^co-authored-by:\s*copilot\b|copilot-swe-agent",
+                ),
+                rule(
+                    "codex",
+                    r"(?im)^co-authored-by:\s*(openai )?codex\b|chatgpt-codex",
+                ),
+                rule(
+                    "cursor",
+                    r"(?im)^co-authored-by:\s*cursor\b|cursoragent@cursor\.com",
+                ),
+                rule("gemini-cli", r"(?im)^co-authored-by:\s*gemini\b"),
+                rule("aider", r"(?im)^co-authored-by:\s*aider\b|\(aider\) <"),
+                rule("devin", r"(?i)devin-ai-integration"),
+            ],
+        }
+    }
 }
 
 /// How hooks observe file changes.
@@ -127,6 +176,7 @@ pub struct Config {
     test: Vec<Regex>,
     build: Vec<Regex>,
     lint: Vec<Regex>,
+    agent_commits: Vec<(String, Regex)>,
     areas: Vec<(String, GlobSet)>,
 }
 
@@ -168,6 +218,20 @@ impl Config {
         let test = compile("test", &raw.commands.test)?;
         let build = compile("build", &raw.commands.build)?;
         let lint = compile("lint", &raw.commands.lint)?;
+        let agent_commits = raw
+            .attribution
+            .agent_commits
+            .iter()
+            .map(|rule| {
+                Regex::new(&rule.pattern)
+                    .map(|re| (rule.agent.clone(), re))
+                    .map_err(|source| ConfigError::Pattern {
+                        class: "attribution",
+                        pattern: rule.pattern.clone(),
+                        source,
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut areas = Vec::with_capacity(raw.areas.len());
         for area in &raw.areas {
             let mut builder = GlobSetBuilder::new();
@@ -191,6 +255,7 @@ impl Config {
             test,
             build,
             lint,
+            agent_commits,
             areas,
         })
     }
@@ -218,6 +283,15 @@ impl Config {
             .map_or(DEFAULT_AREA, |(name, _)| name.as_str())
     }
 
+    /// The agent a commit is attributed to, from its author, committer and
+    /// message (see [`AttributionConfig`]).
+    pub fn agent_for_commit(&self, commit_text: &str) -> Option<&str> {
+        self.agent_commits
+            .iter()
+            .find(|(_, re)| re.is_match(commit_text))
+            .map(|(agent, _)| agent.as_str())
+    }
+
     pub fn max_flagged(&self) -> usize {
         self.raw.report.max_flagged
     }
@@ -232,6 +306,7 @@ impl Default for Config {
             test: Vec::new(),
             build: Vec::new(),
             lint: Vec::new(),
+            agent_commits: Vec::new(),
             areas: Vec::new(),
         })
     }
@@ -275,6 +350,14 @@ lint = [
 {lint}
 ]
 
+# Commits recognized as written by an agent. When a branch has no Witness
+# record from that agent, lines from its commits are flagged "unrecorded".
+# Each pattern is matched against the commit's author, committer and message.
+[attribution]
+agent_commits = [
+{attribution}
+]
+
 # Areas group paths for the agent track record (not computed yet).
 # The first matching area wins; unmatched paths fall in "default".
 # [[areas]]
@@ -282,6 +365,15 @@ lint = [
 # paths = ["src/core/**"]
 "#,
         max = ReportConfig::default().max_flagged,
+        attribution = AttributionConfig::default()
+            .agent_commits
+            .iter()
+            .map(|r| format!(
+                "  {{ agent = \"{}\", pattern = '{}' }},",
+                r.agent, r.pattern
+            ))
+            .collect::<Vec<_>>()
+            .join("\n"),
         snapshots = CaptureConfig::default().snapshots,
         budget = CaptureConfig::default().snapshot_budget_ms,
         test = list(&patterns.test),
@@ -378,6 +470,34 @@ paths = ["crates/**"]
         assert_eq!(config.area_for("crates/witness-core/src/lib.rs"), "core");
         assert_eq!(config.area_for("crates/witness/src/main.rs"), "crates");
         assert_eq!(config.area_for("README.md"), DEFAULT_AREA);
+    }
+
+    #[test]
+    fn recognizes_agent_commits() {
+        let c = Config::default();
+        let commit = |author: &str, message: &str| format!("{author}\n{author}\n\n{message}");
+        assert_eq!(
+            c.agent_for_commit(&commit(
+                "Ada <ada@example.com>",
+                "Fix parser\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+            )),
+            Some("claude-code")
+        );
+        assert_eq!(
+            c.agent_for_commit(&commit(
+                "copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>",
+                "Add tests"
+            )),
+            Some("copilot")
+        );
+        assert_eq!(
+            c.agent_for_commit(&commit("Ada (aider) <ada@example.com>", "aider: fix")),
+            Some("aider")
+        );
+        assert_eq!(
+            c.agent_for_commit(&commit("Ada <ada@example.com>", "Mention Claude in docs")),
+            None
+        );
     }
 
     #[test]

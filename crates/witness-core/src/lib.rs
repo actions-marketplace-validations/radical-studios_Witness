@@ -7,6 +7,7 @@ pub mod command;
 pub mod config;
 pub mod history;
 pub mod hunk;
+pub mod provenance;
 pub mod record;
 pub mod report;
 pub mod timeline;

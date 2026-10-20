@@ -25,11 +25,13 @@ pub fn run(args: RecordArgs) -> Result<()> {
                 None => format!("edit of {file}"),
             };
             let kind = EventKind::Edit {
+                line_hashes: workspace::range_hashes(&root, &file, lines),
                 file,
                 lines,
                 change: None,
                 tool,
                 via: Some(EditVia::Reported),
+                removed_hashes: None,
             };
             (kind, summary)
         }

@@ -36,6 +36,7 @@ pub fn run(args: AssumeArgs) -> Result<()> {
             file: file.clone(),
             lines,
             text,
+            line_hashes: workspace::range_hashes(&root, &file, lines),
         },
     );
     workspace::append_events(&root, &[event])?;

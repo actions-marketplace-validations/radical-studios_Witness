@@ -201,6 +201,8 @@ mod tests {
             change: Some(change),
             tool: "Edit".into(),
             via: None,
+            line_hashes: None,
+            removed_hashes: None,
         }
     }
 

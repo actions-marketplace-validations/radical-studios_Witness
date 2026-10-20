@@ -283,3 +283,111 @@ fn hooks_install_merges_and_uninstalls() {
         "{cursor}"
     );
 }
+
+const LIB: &str = "fn alpha() -> u32 {\n    1\n}\n\nfn beta() -> u32 {\n    2\n}\n";
+
+/// Rebasing onto a base that added lines above the agent's code moves it;
+/// attribution follows the content, not the old line numbers.
+#[test]
+fn attribution_survives_a_rebase() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", LIB);
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    let agent = repo.claude("s");
+    agent.edit(
+        "src/lib.rs",
+        "fn beta() -> u32 {\n    2\n}\n",
+        "fn beta() -> u32 {\n    let doubled = compute_double(1);\n    doubled\n}\n",
+    );
+    agent.bash("cargo test");
+    repo.commit_all("agent change");
+
+    // Meanwhile, main grows above the agent's code.
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write(
+        "src/lib.rs",
+        &format!("// header line one\n// header line two\n// header line three\n{LIB}"),
+    );
+    repo.commit_all("main moves on");
+    repo.git(&["checkout", "-q", "feature"]);
+    repo.git(&["rebase", "-q", "main"]);
+
+    let report = repo.report_json("main", "HEAD");
+    assert_eq!(report["summary"]["sections"], 1, "{report:#}");
+    assert_eq!(report["summary"]["human"], 0);
+    assert_eq!(report["skim"][0]["status"], "checked");
+    assert_eq!(report["skim"][0]["lines"], "9-10");
+}
+
+/// A human edit inside agent code becomes its own (human) section.
+#[test]
+fn human_changes_to_agent_lines_are_split_out() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", LIB);
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    let agent = repo.claude("s");
+    agent.edit(
+        "src/lib.rs",
+        "    2\n",
+        "    let first_value = load_first();\n    let second_value = load_second();\n    first_value + second_value\n",
+    );
+    // The human then rewrites the middle line by hand.
+    let text = repo
+        .read("src/lib.rs")
+        .replace("load_second()", "load_second_cached()");
+    repo.write("src/lib.rs", &text);
+    repo.commit_all("feature");
+
+    let report = repo.report_json("main", "HEAD");
+    assert_eq!(report["summary"]["sections"], 2, "{report:#}");
+    assert_eq!(report["summary"]["human"], 1);
+    let lines: Vec<_> = report["flagged"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["lines"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(lines, vec!["6", "8"]);
+}
+
+/// Code from a commit attributed to an agent that left no record is
+/// flagged, unless the branch has that agent's records.
+#[test]
+fn agent_commits_without_records_are_unrecorded() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", LIB);
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(
+        "src/lib.rs",
+        &LIB.replace("    2\n", "    compute_value(2)\n"),
+    );
+    repo.git(&["add", "-A"]);
+    repo.git(&[
+        "commit",
+        "-q",
+        "-m",
+        "Compute beta\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+    ]);
+    repo.write("src/other.rs", "pub fn other() {}\n");
+    repo.commit_all("human commit");
+
+    let report = repo.report_json("main", "HEAD");
+    assert_eq!(report["summary"]["unrecorded"], 1, "{report:#}");
+    assert_eq!(report["summary"]["human"], 1);
+    assert_eq!(report["flagged"][0]["status"], "unrecorded");
+    assert_eq!(report["flagged"][0]["agent"], "claude-code");
+    assert_eq!(report["flagged"][0]["file"], "src/lib.rs");
+
+    // Once Claude Code's sessions are recorded on the branch, lines outside
+    // the record are trusted to be human.
+    repo.claude("s").read("src/lib.rs");
+    repo.commit_all("add the session log");
+    let report = repo.report_json("main", "HEAD");
+    assert_eq!(report["summary"]["unrecorded"], 0, "{report:#}");
+}

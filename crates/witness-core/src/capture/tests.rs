@@ -8,6 +8,9 @@ use crate::record::{Change, CommandClass, EditVia, Event, EventKind};
 
 const ROOT: &str = "/home/user/my-project";
 
+/// An edit's added and removed line hashes.
+type HashPair = (Option<Vec<String>>, Option<Vec<String>>);
+
 struct Run<'a> {
     agent: Option<&'a str>,
     event_arg: &'a str,
@@ -49,8 +52,44 @@ impl<'a> Run<'a> {
         let input = parse_hook(json, self.agent, self.event_arg).unwrap();
         events_for(&input, &ctx, &read, self.observed.as_ref())
     }
+    /// Record kinds, with line hashes left out (see `edits_carry_line_hashes`).
     fn kinds(&self, json: &str) -> Vec<EventKind> {
-        self.events(json).into_iter().map(|e| e.kind).collect()
+        self.events(json)
+            .into_iter()
+            .map(|e| match e.kind {
+                EventKind::Edit {
+                    file,
+                    lines,
+                    change,
+                    tool,
+                    via,
+                    ..
+                } => EventKind::Edit {
+                    file,
+                    lines,
+                    change,
+                    tool,
+                    via,
+                    line_hashes: None,
+                    removed_hashes: None,
+                },
+                other => other,
+            })
+            .collect()
+    }
+
+    fn hashes(&self, json: &str) -> Vec<HashPair> {
+        self.events(json)
+            .into_iter()
+            .filter_map(|e| match e.kind {
+                EventKind::Edit {
+                    line_hashes,
+                    removed_hashes,
+                    ..
+                } => Some((line_hashes, removed_hashes)),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -90,6 +129,8 @@ fn edit(file: &str, start: u32, removed: u32, added: u32, tool: &str, via: EditV
         change: Some(change),
         tool: tool.into(),
         via: Some(via),
+        line_hashes: None,
+        removed_hashes: None,
     }
 }
 
@@ -673,6 +714,47 @@ fn generic_payloads() {
             .kinds(&fixture("generic/post_tool_edit.json")),
         vec![edit("notes/plan.md", 1, 0, 2, "write", EditVia::Content)]
     );
+}
+
+fn hashed(lines: &[&str]) -> Option<Vec<String>> {
+    Some(crate::record::line_hashes(lines))
+}
+
+#[test]
+fn edits_carry_line_hashes() {
+    // A patch: only `+` and `-` lines, not context.
+    let patch = Run::new().hashes(&fixture("claude-code-v2/post_tool_use_edit.json"));
+    assert_eq!(
+        patch,
+        vec![(
+            hashed(&["    println!(\"b\");"]),
+            hashed(&["    println!(\"a\");"])
+        )]
+    );
+    // A created file: every line.
+    let created = Run::new().hashes(&fixture("claude-code-v2/post_tool_use_write.json"));
+    assert_eq!(created, vec![(hashed(&["one", "two"]), None)]);
+    // Located text: the whole lines it sits on.
+    let kinds = Run::new()
+        .agent(Some("copilot"), "postToolUse")
+        .file(
+            "/home/user/my-project/src/lib.rs",
+            "fn a() {\n    1 + 1\n}\n",
+        )
+        .hashes(&fixture("copilot/post_tool_use_edit.json"));
+    assert_eq!(kinds, vec![(hashed(&["    1 + 1"]), None)]);
+    // Observed diffs.
+    let mut h = hunk("src/x.rs", 3, 1, 3, 1);
+    h.added = vec!["new".into()];
+    h.removed = vec!["old".into()];
+    let json = fixture("post_tool_use_bash.json").replace("npm test", "sed -i x src/x.rs");
+    let observed = Run::new()
+        .observed(Observed {
+            via: EditVia::Snapshot,
+            hunks: vec![h],
+        })
+        .hashes(&json);
+    assert_eq!(observed, vec![(hashed(&["new"]), hashed(&["old"]))]);
 }
 
 #[test]

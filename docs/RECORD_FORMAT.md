@@ -63,6 +63,15 @@ file **as it was right after the event**. A pure deletion is recorded as the
 two lines around the gap (`{start: s-1, end: s}`, clamped to 1) so it can
 overlap the corresponding git hunk.
 
+### Line hashes
+
+A line hash identifies a line's content wherever it moves: the first 10 hex
+digits (40 bits) of the SHA-256 of the line with leading and trailing
+whitespace removed. Reports hash each line of the diff the same way and
+match it to the edits that wrote it, so attribution survives rebases and
+squash merges. 40 bits are plenty to tell a file's lines apart and far too
+few to recover a line that isn't in the repository anyway.
+
 ### `edit`
 
 The agent changed a file.
@@ -74,6 +83,8 @@ The agent changed a file.
 | `change` | object or absent| `{"start": s, "removed": r, "added": n}`: the edit replaced `r` lines starting at line `s` with `n` lines. Used to shift earlier ranges in the same file when later edits move lines. |
 | `tool`   | string          | The agent's tool name, e.g. `Edit`, `apply_patch`, `create`, or the shell tool (`Bash`, `bash`, ...) for files a command changed. |
 | `via`    | string, optional| How the range was observed: `patch`, `preimage`, `snapshot`, `content`, `locate`, `reported` or `unknown`. Absent in older logs. |
+| `line_hashes` | array of strings, optional | Line hash of each line the edit added, in order (see below). Absent when unknown. |
+| `removed_hashes` | array of strings, optional | Line hash of each line it removed, when known. |
 
 One tool call may produce several `edit` lines (e.g. `replace_all`,
 `MultiEdit`, or a command that changed several places). Within a call they
@@ -126,6 +137,7 @@ Recorded by `witness assume`.
 | `file`  | string           | Path relative to the repo root. |
 | `lines` | range or absent  | Absent means the whole file. |
 | `text`  | string           | What the agent relied on without verifying, truncated to 500 characters, secrets redacted. |
+| `line_hashes` | array of strings, optional | Line hashes of `lines` when the assumption was recorded. |
 
 ### `note`
 
@@ -147,6 +159,7 @@ Written by the `SessionEnd` hook. Marks the log as complete.
 
 ## What is never stored
 
+
 - Tool output (`tool_response` contents, stdout, stderr, error text).
 - File contents, including `old_string`, `new_string` and `content`. Capture
   reads them in memory to compute line ranges and drops them. Pre-tool file
@@ -166,7 +179,7 @@ Written by the `SessionEnd` hook. Marks the log as complete.
 
 ```json
 {"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:37:00.120Z","agent":"claude-code","kind":"read","file":"src/parse.rs"}
-{"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:37:04.512Z","agent":"claude-code","kind":"edit","file":"src/parse.rs","lines":{"start":12,"end":18},"change":{"start":12,"removed":3,"added":7},"tool":"Edit"}
+{"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:37:04.512Z","agent":"claude-code","turn":"c05f","kind":"edit","file":"src/parse.rs","lines":{"start":12,"end":18},"change":{"start":12,"removed":3,"added":7},"tool":"Edit","via":"patch","line_hashes":["1d5f0a3b9c","8e21c4f077","c3a9e5d012","4b7f81a6e3","f02d9c3b58","6a1e7d4c90","b5c08f2e71"],"removed_hashes":["9f3c2a1e88","07d4b6c5a2","e8a1f3920d"]}
 {"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:37:09.001Z","agent":"claude-code","kind":"assumption","file":"src/parse.rs","lines":{"start":14,"end":15},"text":"the upstream API returns timestamps in UTC"}
 {"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:37:30.774Z","agent":"claude-code","kind":"command","classification":"test","exit_code":0,"command":"cargo test -p parser"}
 {"schema_version":1,"session_id":"3f1c","timestamp":"2026-10-20T03:40:00.000Z","agent":"claude-code","kind":"session_end","reason":"other"}

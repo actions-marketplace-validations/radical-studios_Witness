@@ -13,7 +13,7 @@ in the repository.
                                                │
  git diff base...head ──▶ hunks ──┐            │
                                   ▼            ▼
-                    witness-core: replay events → match to hunks
+                    witness-core: replay events → attribute lines by content
                                   → classify → report (markdown | json)
                                                │
                          witness-platform: dry-run | github* | gitlab*
@@ -97,25 +97,34 @@ See [RECORD_FORMAT.md](RECORD_FORMAT.md) for the records.
 3. **Replay.** Events are sorted (timestamp, session, position). Edits and
    assumptions with ranges are kept as live spans per file; each later edit
    with a known `change` shifts the spans below it by `added - removed`.
-   This corrects for the agent's own later edits moving lines. It does not
-   correct for human commits made after the session (see Limitations).
-4. **Match.** A hunk's span at head is `new_start..new_start+new_count-1`;
-   a pure deletion becomes the two lines around the gap. An event matches a
-   hunk when it names the same file and its span overlaps, or it has no span
-   (whole file).
+   Spans are the fallback for edits recorded without line hashes.
+4. **Attribute** (`witness-core/src/provenance.rs`). Each added line of a
+   hunk is hashed the way capture hashes the lines an edit wrote; its author
+   is the latest agent edit whose `line_hashes` contain it, else human.
+   Content, not position, decides, so attribution survives rebases, later
+   human commits and squash merges. Lines that say nothing about their
+   author (blank, `}`, `end`) take their neighbors' author; short lines
+   (`return x;`) count only near the edit's replayed range or next to other
+   agent lines, since they recur. Pure deletions match the edits'
+   `removed_hashes`. Edits without hashes (older logs, notebooks, binary
+   files) match by replayed span. A hunk whose lines have different authors
+   becomes several segments, so a human tweak inside agent code is its own
+   section. Assumptions attach to a segment when they cover the whole file,
+   their recorded lines hash the same, or their replayed range overlaps.
 5. **Classify** (`witness-core/src/classify.rs`, the swappable module):
 
    | Status       | Rule | Review |
    | ------------ | ---- | ------ |
-   | `guessed`    | an assumption overlaps the hunk | look closely |
-   | `human`      | otherwise, no agent edit overlaps the hunk | excluded |
-   | `checked`    | a `test` or `build` command exited 0 after the hunk's last overlapping edit, and no `test`/`build` failed after that pass | skim |
-   | `unverified` | edited by the agent, none of the above | look closely |
+   | `guessed`    | an assumption covers the segment | look closely |
+   | `unrecorded` | no agent edit wrote it, but every line blames to a commit attributed to an agent (`[attribution]`, e.g. a `Co-authored-by: Claude` trailer) that has no records on the branch | look closely |
+   | `human`      | otherwise, no agent edit wrote it | excluded |
+   | `checked`    | a `test` or `build` command exited 0 after the segment's last edit, and no `test`/`build` failed after that pass | skim |
+   | `unverified` | written by the agent, none of the above | look closely |
 
-   Every hunk gets a one-line reason. Commands with `exit_code: null` count
+   Every segment gets a one-line reason. Commands with `exit_code: null` count
    as neither pass nor fail. `lint` commands don't verify behavior and
    are ignored by v0.
-6. **Report.** Flagged hunks (guessed first, then unverified, then by path
+6. **Report.** Flagged segments (guessed first, then unverified, then by path
    and line) up to `report.max_flagged`; the rest are listed as skimmable.
    Markdown and JSON carry the same data (`witness_core::report::Report`).
 
@@ -207,11 +216,10 @@ class wins (`test` > `build` > `lint` > `other`).
 
 ## Limitations of v0
 
-- **Line drift from human commits.** Ranges are corrected for the agent's
-  own later edits but not for commits made after the session. A human
-  inserting lines above an agent edit can shift it off its hunk; it then
-  shows as `human`. A future version can re-map ranges through
-  `git diff <session commit> head`.
+- **Repeated short lines.** Content matching can't tell two identical
+  short lines apart; they count as the agent's only near its recorded range
+  or next to other agent lines, so such a line moved far away by a rebase
+  may show as human.
 - **Pipes hide exit codes.** `cargo test | tail` records `exit_code: null`,
   so such runs never count as checks (unless the line starts with
   `set -o pipefail`). Agents pipe test output often; the skill asks them not

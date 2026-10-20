@@ -4,10 +4,11 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::classify::{Classifier, Status};
+use crate::classify::{Classifier, Status, Verdict};
 use crate::config::Config;
 use crate::history::{HistoryStore, HunkFingerprint};
 use crate::hunk::Hunk;
+use crate::provenance::{self, Segment};
 use crate::record::Event;
 use crate::timeline::Timeline;
 
@@ -41,6 +42,9 @@ pub struct Summary {
     pub review_closely: usize,
     pub guessed: usize,
     pub unverified: usize,
+    /// From commits attributed to an agent, with no Witness record.
+    #[serde(default)]
+    pub unrecorded: usize,
     pub checked: usize,
     /// Sections with no agent edit, not counted in `sections`.
     pub human: usize,
@@ -82,11 +86,20 @@ pub struct ReportInput<'a> {
     pub config: &'a Config,
     pub classifier: &'a dyn Classifier,
     pub history: &'a dyn HistoryStore,
+    /// For lines no recorded agent edit wrote: the agent their commit is
+    /// attributed to (e.g. by a `Co-authored-by` trailer), if any.
+    pub commit_agent: &'a dyn Fn(&Segment) -> Option<String>,
+}
+
+/// A [`ReportInput::commit_agent`] that attributes nothing.
+pub fn no_commit_agent(_: &Segment) -> Option<String> {
+    None
 }
 
 pub fn build(input: ReportInput<'_>) -> Report {
     let session_count = input.sessions.len();
     let timeline = Timeline::build(input.sessions);
+    let segments = provenance::attribute(input.hunks, &timeline);
 
     let mut flagged = Vec::new();
     let mut skim = Vec::new();
@@ -95,13 +108,25 @@ pub fn build(input: ReportInput<'_>) -> Report {
         review_closely: 0,
         guessed: 0,
         unverified: 0,
+        unrecorded: 0,
         checked: 0,
         human: 0,
         sessions: session_count,
         skipped_lines: input.skipped_lines,
     };
-    for hunk in input.hunks {
-        let verdict = input.classifier.classify(hunk, &timeline);
+    for segment in &segments {
+        let mut verdict = input.classifier.classify(segment, &timeline);
+        if verdict.status == Status::Human
+            && let Some(agent) = (input.commit_agent)(segment)
+        {
+            verdict = Verdict {
+                status: Status::Unrecorded,
+                reason: format!(
+                    "Committed as written by {agent}, but no Witness record covers these lines"
+                ),
+                agent: Some(agent),
+            };
+        }
         match verdict.status {
             Status::Human => {
                 summary.human += 1;
@@ -109,25 +134,21 @@ pub fn build(input: ReportInput<'_>) -> Report {
             }
             Status::Guessed => summary.guessed += 1,
             Status::Unverified => summary.unverified += 1,
+            Status::Unrecorded => summary.unrecorded += 1,
             Status::Checked => summary.checked += 1,
         }
         summary.sections += 1;
-        // Lines at head: a deletion sits after `new_start`; binary has none.
-        let (start, end) = match hunk.span() {
-            None => (None, None),
-            Some(_) if hunk.is_pure_deletion() => (Some(hunk.new_start), Some(hunk.new_start)),
-            Some(span) => (Some(span.start), Some(span.end)),
-        };
+        let (start, end) = segment.bounds();
         let section = Section {
-            file: hunk.file.clone(),
-            lines: hunk.display_lines(),
+            file: segment.file.clone(),
+            lines: segment.display_lines(),
             start,
             end,
             status: verdict.status,
             reason: verdict.reason,
             agent: verdict.agent,
-            area: input.config.area_for(&hunk.file).to_owned(),
-            fingerprint: HunkFingerprint::new(&hunk.file, &hunk.added),
+            area: input.config.area_for(&segment.file).to_owned(),
+            fingerprint: HunkFingerprint::new(&segment.file, &segment.added),
         };
         if section.status.is_flagged() {
             flagged.push(section);
@@ -365,6 +386,8 @@ mod tests {
             change: Some(change),
             tool: "Edit".into(),
             via: None,
+            line_hashes: None,
+            removed_hashes: None,
         }
     }
 
@@ -393,6 +416,7 @@ mod tests {
                     file: "src/b.rs".into(),
                     lines: Some(LineRange::new(5, 5)),
                     text: "the | separator is never escaped".into(),
+                    line_hashes: None,
                 },
             ),
         ]];
@@ -406,6 +430,7 @@ mod tests {
             config: &config,
             classifier: &V0Rules,
             history: &NullHistoryStore,
+            commit_agent: &no_commit_agent,
         })
     }
 
@@ -474,6 +499,7 @@ mod tests {
             config: &config,
             classifier: &V0Rules,
             history: &NullHistoryStore,
+            commit_agent: &no_commit_agent,
         });
         assert!(report.to_markdown().contains("No agent-written sections"));
     }

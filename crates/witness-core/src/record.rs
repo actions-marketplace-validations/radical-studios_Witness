@@ -50,6 +50,12 @@ pub enum EventKind {
         /// How the change was observed; absent in older logs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via: Option<EditVia>,
+        /// [`line_hash`] of each line the edit added, in order.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line_hashes: Option<Vec<String>>,
+        /// [`line_hash`] of each line the edit removed, in order.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        removed_hashes: Option<Vec<String>>,
     },
     Read {
         file: String,
@@ -64,6 +70,9 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lines: Option<LineRange>,
         text: String,
+        /// [`line_hash`] of each line in `lines` when it was recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line_hashes: Option<Vec<String>>,
     },
     SessionEnd {
         reason: String,
@@ -204,6 +213,27 @@ impl Event {
     }
 }
 
+/// Hex digits kept of a line's SHA-256 (40 bits): enough to tell lines of a
+/// file apart, too few to recover a line that isn't already in the repo.
+pub const LINE_HASH_HEX: usize = 10;
+
+/// Identifies a line's content independently of where it sits: the start
+/// of the SHA-256 of the line with surrounding whitespace trimmed.
+pub fn line_hash(line: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(line.trim().as_bytes());
+    digest
+        .iter()
+        .take(LINE_HASH_HEX / 2)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// [`line_hash`] of each line.
+pub fn line_hashes<S: AsRef<str>>(lines: &[S]) -> Vec<String> {
+    lines.iter().map(|l| line_hash(l.as_ref())).collect()
+}
+
 /// Result of parsing a session log.
 #[derive(Debug, Default)]
 pub struct ParsedLog {
@@ -309,6 +339,8 @@ mod tests {
                 }),
                 tool: "Edit".into(),
                 via: None,
+                line_hashes: None,
+                removed_hashes: None,
             },
         );
         let line = event.to_line().unwrap();
@@ -332,6 +364,8 @@ mod tests {
                 change: None,
                 tool: "apply_patch".into(),
                 via: Some(EditVia::Preimage),
+                line_hashes: Some(vec![line_hash("a"), line_hash("b")]),
+                removed_hashes: None,
             },
         );
         event.turn = Some("t1".into());
@@ -360,6 +394,13 @@ mod tests {
         let parsed = parse_log(text);
         assert_eq!(parsed.events.len(), 2);
         assert_eq!(parsed.skipped, 4);
+    }
+
+    #[test]
+    fn line_hashes_ignore_surrounding_whitespace() {
+        assert_eq!(line_hash("  let x = 1;\t"), line_hash("let x = 1;"));
+        assert_ne!(line_hash("let x = 1;"), line_hash("let x = 2;"));
+        assert_eq!(line_hash("x").len(), LINE_HASH_HEX);
     }
 
     #[test]
