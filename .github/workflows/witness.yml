@@ -1,0 +1,27 @@
+# Runs Witness on this repository's own pull requests, built from the
+# branch under review.
+name: Witness
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build witness from this branch
+        run: |
+          cargo install --path crates/witness --locked --root "$RUNNER_TEMP/witness"
+          echo "$RUNNER_TEMP/witness/bin" >> "$GITHUB_PATH"
+      - uses: ./
+        with:
+          version: none

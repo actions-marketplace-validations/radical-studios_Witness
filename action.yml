@@ -1,0 +1,66 @@
+name: Witness review plan
+description: Tells reviewers which parts of an AI-written pull request were verified and which were guessed.
+author: Radical Studios
+branding:
+  icon: eye
+  color: purple
+
+inputs:
+  version:
+    description: Witness release to install ("latest", a tag such as v0.2.0, or "none" to use the witness already on PATH).
+    default: latest
+  base:
+    description: Ref to compare with. Defaults to the pull request's base branch.
+    default: ""
+  comment:
+    description: Post or update the review plan comment on the pull request ("true" or "false").
+    default: "true"
+  annotations:
+    description: Annotate lines to review closely in the diff ("true" or "false").
+    default: "true"
+  fail-on:
+    description: Comma-separated statuses or signals that fail the step, e.g. failing,test-changed-after-failure.
+    default: ""
+  token:
+    description: Token for commenting; needs pull-requests write permission.
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Witness
+      if: inputs.version != 'none' && runner.os != 'Windows'
+      shell: bash
+      env:
+        WITNESS_VERSION: ${{ inputs.version }}
+        WITNESS_INSTALL_DIR: ${{ runner.temp }}/witness-bin
+      run: |
+        sh "$GITHUB_ACTION_PATH/install.sh"
+        echo "$WITNESS_INSTALL_DIR" >> "$GITHUB_PATH"
+    - name: Install Witness (Windows)
+      if: inputs.version != 'none' && runner.os == 'Windows'
+      shell: pwsh
+      env:
+        WITNESS_VERSION: ${{ inputs.version }}
+        WITNESS_INSTALL_DIR: ${{ runner.temp }}\witness-bin
+      run: |
+        & "$env:GITHUB_ACTION_PATH\install.ps1"
+        Add-Content -Path $env:GITHUB_PATH -Value $env:WITNESS_INSTALL_DIR
+    - name: Review plan
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        WITNESS_BASE: ${{ inputs.base }}
+        WITNESS_COMMENT: ${{ inputs.comment }}
+        WITNESS_ANNOTATIONS: ${{ inputs.annotations }}
+        WITNESS_FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        set -euo pipefail
+        args=()
+        if [ -n "$WITNESS_FAIL_ON" ]; then args+=(--fail-on "$WITNESS_FAIL_ON"); fi
+        if [ "$WITNESS_ANNOTATIONS" = "true" ]; then witness report --format github; fi
+        if [ "$WITNESS_COMMENT" = "true" ]; then
+          witness post --platform github ${args[@]+"${args[@]}"}
+        else
+          witness report --format markdown ${args[@]+"${args[@]}"} >> "$GITHUB_STEP_SUMMARY"
+        fi

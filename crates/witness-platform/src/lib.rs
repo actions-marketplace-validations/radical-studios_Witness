@@ -11,6 +11,7 @@ pub use witness_core::REPORT_MARKER;
 
 pub mod github;
 pub mod gitlab;
+pub mod http;
 
 /// A rendered report, ready to post.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,12 +40,19 @@ pub enum PostOutcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PlatformError {
-    #[error("posting to {0} is not implemented yet")]
-    NotImplemented(&'static str),
     #[error("report body is missing the {REPORT_MARKER} marker")]
     MissingMarker,
-    #[error("could not write dry-run output: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Http(String),
+    #[error("don't know {0}; pass it on the command line or run in CI")]
+    Missing(&'static str),
+    /// The token can't do this (401/403), e.g. a pull request from a fork.
+    #[error("not allowed: {0}")]
+    Forbidden(String),
+    #[error("HTTP {status}: {message}")]
+    Status { status: u16, message: String },
 }
 
 /// A code review platform.
@@ -144,13 +152,173 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn real_platforms_are_stubs() {
-        for platform in [&github::GitHub as &dyn Platform, &gitlab::GitLab] {
-            assert!(matches!(
-                platform.post(&report(), &PostTarget::default()),
-                Err(PlatformError::NotImplemented(_))
-            ));
+    use std::cell::RefCell;
+
+    use http::{Http, Request, Response};
+
+    /// Answers requests from a script and records them.
+    struct FakeHttp {
+        responses: RefCell<Vec<Response>>,
+        seen: RefCell<Vec<(String, String, Option<String>)>>,
+    }
+
+    impl FakeHttp {
+        fn new(responses: Vec<(u16, &str)>) -> Self {
+            Self {
+                responses: RefCell::new(
+                    responses
+                        .into_iter()
+                        .rev()
+                        .map(|(status, body)| Response {
+                            status,
+                            body: body.to_owned(),
+                        })
+                        .collect(),
+                ),
+                seen: RefCell::new(Vec::new()),
+            }
         }
+        fn requests(&self) -> Vec<(String, String)> {
+            self.seen
+                .borrow()
+                .iter()
+                .map(|(m, u, _)| (m.clone(), u.clone()))
+                .collect()
+        }
+    }
+
+    impl Http for FakeHttp {
+        fn send(&self, request: &Request<'_>) -> Result<Response, PlatformError> {
+            self.seen.borrow_mut().push((
+                request.method.to_owned(),
+                request.url.to_owned(),
+                request.body.clone(),
+            ));
+            self.responses
+                .borrow_mut()
+                .pop()
+                .ok_or_else(|| PlatformError::Http("no scripted response".into()))
+        }
+    }
+
+    fn target() -> PostTarget {
+        PostTarget {
+            repository: Some("acme/app".into()),
+            number: Some(7),
+        }
+    }
+
+    #[test]
+    fn github_updates_the_marked_comment() {
+        let http = FakeHttp::new(vec![
+            (
+                200,
+                r#"[{"id": 1, "body": "LGTM"}, {"id": 2, "body": "<!-- witness:report -->\nold"}]"#,
+            ),
+            (
+                200,
+                r#"{"id": 2, "html_url": "https://github.com/acme/app/pull/7#issuecomment-2"}"#,
+            ),
+        ]);
+        let gh = github::GitHub {
+            http: &http,
+            token: "t".into(),
+            api_url: "https://api.github.com".into(),
+        };
+        let outcome = gh.post(&report(), &target()).unwrap();
+        assert_eq!(
+            outcome,
+            PostOutcome::Updated {
+                url: Some("https://github.com/acme/app/pull/7#issuecomment-2".into())
+            }
+        );
+        assert_eq!(
+            http.requests(),
+            vec![
+                (
+                    "GET".into(),
+                    "https://api.github.com/repos/acme/app/issues/7/comments?per_page=100&page=1"
+                        .into()
+                ),
+                (
+                    "PATCH".into(),
+                    "https://api.github.com/repos/acme/app/issues/comments/2".into()
+                ),
+            ]
+        );
+        let body = http.seen.borrow()[1].2.clone().unwrap();
+        assert!(body.contains("### Witness review plan"));
+    }
+
+    #[test]
+    fn github_creates_a_comment_and_reports_forbidden() {
+        let http = FakeHttp::new(vec![(200, "[]"), (201, r#"{"id": 9, "html_url": "u"}"#)]);
+        let gh = github::GitHub {
+            http: &http,
+            token: "t".into(),
+            api_url: "https://ghe.example.com/api/v3/".into(),
+        };
+        assert_eq!(
+            gh.post(&report(), &target()).unwrap(),
+            PostOutcome::Created {
+                url: Some("u".into())
+            }
+        );
+        assert_eq!(
+            http.requests()[1],
+            (
+                "POST".into(),
+                "https://ghe.example.com/api/v3/repos/acme/app/issues/7/comments".into()
+            )
+        );
+
+        let http = FakeHttp::new(vec![(
+            403,
+            r#"{"message": "Resource not accessible by integration"}"#,
+        )]);
+        let gh = github::GitHub {
+            http: &http,
+            token: "t".into(),
+            api_url: "https://api.github.com".into(),
+        };
+        assert!(matches!(
+            gh.post(&report(), &target()),
+            Err(PlatformError::Forbidden(m)) if m.contains("not accessible")
+        ));
+        assert!(matches!(
+            gh.post(&report(), &PostTarget::default()),
+            Err(PlatformError::Missing(_))
+        ));
+    }
+
+    #[test]
+    fn gitlab_updates_the_marked_note() {
+        let http = FakeHttp::new(vec![
+            (
+                200,
+                r#"[{"id": 5, "system": true, "body": "<!-- witness:report -->"}, {"id": 6, "body": "<!-- witness:report -->"}]"#,
+            ),
+            (200, r#"{"id": 6}"#),
+        ]);
+        let gl = gitlab::GitLab {
+            http: &http,
+            token: "t".into(),
+            api_url: "https://gitlab.com/api/v4".into(),
+            mr_url: Some("https://gitlab.com/acme/app/-/merge_requests/7".into()),
+        };
+        let outcome = gl.post(&report(), &target()).unwrap();
+        assert_eq!(
+            outcome,
+            PostOutcome::Updated {
+                url: Some("https://gitlab.com/acme/app/-/merge_requests/7#note_6".into())
+            }
+        );
+        assert_eq!(
+            http.requests()[1],
+            (
+                "PUT".into(),
+                "https://gitlab.com/api/v4/projects/acme%2Fapp/merge_requests/7/notes/6".into()
+            )
+        );
     }
 }

@@ -13,8 +13,12 @@ use witness_core::report::{self, LinkStyle, Links, TextOptions};
 use witness_core::signals::SignalKind;
 use witness_core::testsum::RunOutcome;
 use witness_git::Git;
-use witness_platform::{DryRun, Platform, PostTarget, RenderedReport, github, gitlab};
+use witness_platform::github::GitHub;
+use witness_platform::gitlab::GitLab;
+use witness_platform::http::Curl;
+use witness_platform::{DryRun, Platform, PlatformError, PostOutcome, PostTarget, RenderedReport};
 
+use crate::ci::{self, Host};
 use crate::cli::{
     ColorArg, ExplainArgs, Format, OutputArgs, PlatformArg, PostArgs, ReportArgs, SessionsArgs,
     StatusArgs,
@@ -166,6 +170,15 @@ pub fn run_sessions(args: SessionsArgs) -> Result<()> {
 
 pub fn run_post(args: PostArgs) -> Result<ExitCode> {
     let fail_on = FailOn::parse(&args.fail_on)?;
+    let ci = ci::current();
+    let platform = match (args.platform, ci.host) {
+        (PlatformArg::Auto, Some(Host::GitHub)) | (PlatformArg::Github, _) => PlatformArg::Github,
+        (PlatformArg::Auto, Some(Host::GitLab)) | (PlatformArg::Gitlab, _) => PlatformArg::Gitlab,
+        (PlatformArg::DryRun, _) => PlatformArg::DryRun,
+        (PlatformArg::Auto, None) => bail!(
+            "not running in GitHub Actions or GitLab CI; pass --platform github|gitlab|dry-run"
+        ),
+    };
     let repo = Repo::open()?;
     let base = resolve_base(&repo.git, args.range.base.as_deref())?;
     let head = args.range.head.as_str();
@@ -179,27 +192,105 @@ pub fn run_post(args: PostArgs) -> Result<ExitCode> {
     };
     let mut report =
         pipeline::compute(&repo.git, &req, &repo.config).map_err(shallow_hint(&repo))?;
-    if let Some(links) = links_for(&repo.git, head) {
+    if let Some(mut links) = links_for(&repo.git, head) {
+        // GitHub builds pull requests on a temporary merge commit; link to
+        // the change's own head instead.
+        if let Some(sha) = &ci.head_sha {
+            links.sha.clone_from(sha);
+        }
         report.set_links(&links);
     }
-    let rendered = RenderedReport {
-        markdown: report.to_markdown(),
-    };
+    let markdown = report.to_markdown();
+    if let Some(summary) = &ci.step_summary
+        && let Err(err) = append(summary, &markdown)
+    {
+        eprintln!("witness: could not write the job summary: {err}");
+    }
+    let rendered = RenderedReport { markdown };
     let target = PostTarget {
-        repository: args.repo,
-        number: args.number,
+        repository: args.repo.or(ci.repository.clone()),
+        number: args.number.or(ci.number),
     };
-    let stdout = std::io::stdout();
-    let dry_run = DryRun::new(stdout.lock());
-    let platform: &dyn Platform = match args.platform {
-        PlatformArg::DryRun => &dry_run,
-        PlatformArg::Github => &github::GitHub,
-        PlatformArg::Gitlab => &gitlab::GitLab,
+    let token = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|n| std::env::var(n).ok().filter(|v| !v.is_empty()))
     };
-    platform
-        .post(&rendered, &target)
-        .with_context(|| format!("posting to {}", platform.name()))?;
+    let outcome = match platform {
+        PlatformArg::DryRun | PlatformArg::Auto => {
+            let stdout = std::io::stdout();
+            DryRun::new(stdout.lock()).post(&rendered, &target)
+        }
+        PlatformArg::Github => {
+            let token = token(&["WITNESS_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"])
+                .ok_or_else(|| anyhow!("set GITHUB_TOKEN (or WITNESS_GITHUB_TOKEN) to post"))?;
+            let github = GitHub {
+                http: &Curl,
+                token,
+                api_url: ci
+                    .api_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.github.com".to_owned()),
+            };
+            github.post(&rendered, &target)
+        }
+        PlatformArg::Gitlab => {
+            let token = token(&["WITNESS_GITLAB_TOKEN", "GITLAB_TOKEN"]).ok_or_else(|| {
+                anyhow!("set WITNESS_GITLAB_TOKEN to a token with api scope to post")
+            })?;
+            let gitlab = GitLab {
+                http: &Curl,
+                token,
+                api_url: ci
+                    .api_url
+                    .clone()
+                    .unwrap_or_else(|| "https://gitlab.com/api/v4".to_owned()),
+                mr_url: ci.mr_url.clone(),
+            };
+            gitlab.post(&rendered, &target)
+        }
+    };
+    match outcome {
+        Ok(PostOutcome::Created { url }) => {
+            eprintln!("witness: posted the review plan{}", at(url.as_deref()));
+        }
+        Ok(PostOutcome::Updated { url }) => {
+            eprintln!("witness: updated the review plan{}", at(url.as_deref()));
+        }
+        Ok(PostOutcome::DryRun) => {}
+        // A pull request from a fork gets a read-only token. Don't fail the
+        // build over it: the plan is in the job summary and annotations.
+        Err(PlatformError::Forbidden(message)) if ci.host.is_some() => {
+            eprintln!(
+                "witness: warning: can't comment ({message}); this is expected for pull requests                  from forks. The review plan is in the job summary."
+            );
+            if ci.host == Some(Host::GitHub) {
+                println!(
+                    "::warning title=Witness::Could not post the review plan comment ({message}); see the job summary."
+                );
+            }
+        }
+        Err(err) => return Err(anyhow!(err)).context("posting the review plan"),
+    }
     Ok(fail_on.check(&report))
+}
+
+fn at(url: Option<&str>) -> String {
+    url.map(|u| format!(": {u}")).unwrap_or_default()
+}
+
+fn append(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    // The marker comment is noise in a job summary.
+    let body = text
+        .strip_prefix(witness_core::REPORT_MARKER)
+        .unwrap_or(text)
+        .trim_start();
+    writeln!(file, "{body}")
 }
 
 /// The report for the branch plus uncommitted work, and notes for the user.

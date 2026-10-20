@@ -1,7 +1,7 @@
 {
   "name": "witness",
   "displayName": "Witness",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Records what the agent verified (tests run after edits, files read) versus what it assumed, so reviewers know where to look closely.",
   "author": {
     "name": "Radical Studios"

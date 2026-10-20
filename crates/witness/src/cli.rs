@@ -250,7 +250,7 @@ pub enum ColorArg {
 
 #[derive(Debug, Args)]
 pub struct PostArgs {
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, default_value_t = PlatformArg::Auto)]
     pub platform: PlatformArg,
     #[command(flatten)]
     pub range: RangeArgs,
@@ -268,6 +268,8 @@ pub struct PostArgs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum PlatformArg {
+    /// The CI the command runs in (GitHub Actions or GitLab CI).
+    Auto,
     Github,
     Gitlab,
     DryRun,

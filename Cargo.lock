@@ -744,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "witness"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -759,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "witness-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "globset",
  "proptest",
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "witness-git"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "tempfile",
@@ -785,8 +785,9 @@ dependencies = [
 
 [[package]]
 name = "witness-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "serde_json",
  "thiserror",
  "witness-core",
 ]

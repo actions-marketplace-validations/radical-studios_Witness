@@ -16,8 +16,7 @@ in the repository.
                     witness-core: replay events → attribute lines by content
                                   → classify → report (markdown | json)
                                                │
-                         witness-platform: dry-run | github* | gitlab*
-                                                       (* stubs in v0)
+                         witness-platform: github | gitlab | dry-run
 ```
 
 ## Crates
@@ -26,7 +25,7 @@ in the repository.
 | ------------------- | ---- | --- |
 | `witness-core`      | Data model, record format, hook payload parsing, command classification and redaction, config parsing, event→hunk matching, hunk classification, report rendering, track-record types. | None. Callers pass in strings, file contents and a clock. |
 | `witness-git`       | `Git` trait over the `git` CLI (`diff`, `rev-parse`, `merge-base`, `ls-tree`, `show`, `log`, `blame`), working-tree snapshots through a private index, and a unified-diff parser that turns `git diff -U0` into `Hunk`s. | Spawns `git`. No libgit2. |
-| `witness-platform`  | `Platform` trait. `DryRun` writes to any `io::Write`. `github` and `gitlab` return `NotImplemented`. | Dry run writes to the given writer only. No network in v0. |
+| `witness-platform`  | `Platform` trait with GitHub (issue comments), GitLab (MR notes) and dry-run adapters, over an `Http` trait. | HTTP through the `curl` binary; dry run writes to the given writer. |
 | `witness`           | CLI (clap derive): `init`, `hooks`, `hook`, `assume`, `exec`, `record`, `report`, `post`. Owns all filesystem access, snapshots, and wires the crates together. | Filesystem, stdin/stdout, child processes, `git` via `witness-git`. |
 
 Dependency direction: `witness` → `witness-platform`, `witness-git` →
@@ -182,12 +181,24 @@ pub trait Platform {
 }
 ```
 
-`RenderedReport` holds the markdown and the `REPORT_MARKER`. Adapters are
-expected to: find an existing comment containing the marker on the PR/MR,
-update it if found, otherwise create one. Only that differs per platform; the
-report is computed identically everywhere from git. In v0, `github` and
-`gitlab` return `PlatformError::NotImplemented`; `dry-run` prints what would
-be posted.
+`RenderedReport` holds the markdown, which starts with `REPORT_MARKER`.
+Adapters find the comment containing the marker on the PR/MR, update it if
+found, and otherwise create one; only that differs per platform, the
+report is computed identically everywhere from git.
+
+- `github`: issue comments through the REST API (`GITHUB_API_URL` for
+  GitHub Enterprise Server).
+- `gitlab`: merge request notes through the REST API (`CI_API_V4_URL`).
+- `dry-run`: prints what would be posted.
+
+HTTP goes through a small `Http` trait implemented by running `curl`
+(proxies and system certificates work as for any other tool; the token
+travels on curl's stdin). Tests use a scripted fake. In CI,
+`crates/witness/src/ci.rs` reads the repository, PR number, head commit
+and job summary file from the environment (`GITHUB_EVENT_PATH`,
+`CI_MERGE_REQUEST_IID`, ...). A 401/403 in CI, as for pull requests from
+forks, is a warning: the plan stays in the job summary and annotations.
+See [CI.md](CI.md).
 
 ## Track record (interfaces only)
 

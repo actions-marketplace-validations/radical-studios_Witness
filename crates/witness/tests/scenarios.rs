@@ -612,3 +612,127 @@ fn ci_output_formats() {
     let gitlab: serde_json::Value = serde_json::from_str(&report("gitlab-codequality")).unwrap();
     assert_eq!(gitlab[0]["location"]["lines"]["begin"], 6);
 }
+
+/// `witness post` in GitHub Actions: finds the PR from the event file,
+/// updates the previous comment through the API, and writes the job
+/// summary.
+#[test]
+fn post_updates_the_github_comment() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", LIB);
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    let agent = repo.claude("s");
+    agent.read("src/lib.rs");
+    agent.edit("src/lib.rs", "    2\n", "    compute_beta_value()\n");
+    repo.commit_all("feature");
+
+    let event = repo.abs("event.json");
+    std::fs::write(
+        &event,
+        r#"{"pull_request": {"number": 12, "head": {"sha": "feedbeef"}}}"#,
+    )
+    .unwrap();
+    let summary = repo.abs("summary.md");
+    let api = support::FakeApi::start(vec![
+        (
+            200,
+            r#"[{"id": 77, "body": "<!-- witness:report -->\nold plan"}]"#.to_owned(),
+        ),
+        (
+            200,
+            r#"{"id": 77, "html_url": "https://github.com/acme/app/pull/12#issuecomment-77"}"#
+                .to_owned(),
+        ),
+    ]);
+    let out = support::witness_env(
+        &repo.path,
+        &["post"],
+        None,
+        &[
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_REPOSITORY", "acme/app"),
+            ("GITHUB_SERVER_URL", "https://github.com"),
+            ("GITHUB_API_URL", api.url.as_str()),
+            ("GITHUB_EVENT_PATH", event.to_str().unwrap()),
+            ("GITHUB_STEP_SUMMARY", summary.to_str().unwrap()),
+            ("GITHUB_BASE_REF", "main"),
+            ("GITHUB_TOKEN", "test-token"),
+            ("NO_PROXY", "127.0.0.1,localhost"),
+            ("no_proxy", "127.0.0.1,localhost"),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(
+            "updated the review plan: https://github.com/acme/app/pull/12#issuecomment-77"
+        ),
+        "{stderr}"
+    );
+    let requests = api.requests();
+    assert_eq!(
+        requests[0].0,
+        "GET /repos/acme/app/issues/12/comments?per_page=100&page=1 HTTP/1.1"
+    );
+    assert_eq!(
+        requests[1].0,
+        "PATCH /repos/acme/app/issues/comments/77 HTTP/1.1"
+    );
+    let body: serde_json::Value = serde_json::from_str(&requests[1].1).unwrap();
+    let posted = body["body"].as_str().unwrap();
+    assert!(posted.starts_with("<!-- witness:report -->"));
+    assert!(
+        posted.contains("https://github.com/acme/app/blob/feedbeef/src/lib.rs#L6"),
+        "{posted}"
+    );
+    let written = std::fs::read_to_string(&summary).unwrap();
+    assert!(written.starts_with("### Witness review plan"), "{written}");
+}
+
+/// A fork's read-only token can't comment; that is a warning, not a failure.
+#[test]
+fn post_from_a_fork_falls_back_to_the_summary() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", LIB);
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write("src/lib.rs", &LIB.replace("    2\n", "    3\n"));
+    repo.commit_all("feature");
+    let summary = repo.abs("summary.md");
+    let api = support::FakeApi::start(vec![(
+        403,
+        r#"{"message": "Resource not accessible by integration"}"#.to_owned(),
+    )]);
+    let out = support::witness_env(
+        &repo.path,
+        &["post"],
+        None,
+        &[
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_REPOSITORY", "acme/app"),
+            ("GITHUB_API_URL", api.url.as_str()),
+            ("GITHUB_REF", "refs/pull/3/merge"),
+            ("GITHUB_STEP_SUMMARY", summary.to_str().unwrap()),
+            ("GITHUB_TOKEN", "read-only"),
+            ("NO_PROXY", "127.0.0.1,localhost"),
+            ("no_proxy", "127.0.0.1,localhost"),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("::warning title=Witness::Could not post")
+    );
+    assert!(
+        std::fs::read_to_string(&summary)
+            .unwrap()
+            .contains("Witness review plan")
+    );
+    drop(api.requests());
+}

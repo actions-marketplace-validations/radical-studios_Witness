@@ -9,16 +9,23 @@ skim the rest"*, with a one-line reason for each section. The record lives
 in your repository under `.witness/`, so the report works from plain git on
 any platform.
 
-> Status: early. Capture for Claude Code, the report, and dry-run posting
-> work end to end. Posting to GitHub/GitLab and per-agent track records are
-> interfaces only. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+> Status: early. Capture for Claude Code, Codex, GitHub Copilot, Cursor and
+> Gemini CLI, the report, and posting to GitHub and GitLab work end to end.
+> See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Install
 
-You need Rust 1.88+ and `git` on your `PATH`.
+You need `git` on your `PATH`. Install a prebuilt binary (Linux, macOS):
 
 ```bash
-cargo install --git https://github.com/radical-studios/witness witness
+curl -fsSL https://raw.githubusercontent.com/radical-studios/witness/main/install.sh | sh
+```
+
+On Windows, `irm https://raw.githubusercontent.com/radical-studios/witness/main/install.ps1 | iex`.
+Or build from source with Rust 1.88+:
+
+```bash
+cargo install --git https://github.com/radical-studios/witness witness --locked
 ```
 
 Then add the Claude Code plugin, which installs the hooks and a skill that
@@ -104,6 +111,23 @@ Other commands:
 The base branch defaults to the CI target branch, else origin's default
 branch, else `main` or `master`; pass `--base` to choose. Report links
 point at the head commit on GitHub or GitLab when the remote is on one.
+
+## In CI
+
+```yaml
+# .github/workflows/witness.yml
+on: pull_request
+permissions: { contents: read, pull-requests: write }
+jobs:
+  review-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: radical-studios/witness@v0
+```
+
+GitLab, other CI systems, SARIF and gating: [docs/CI.md](docs/CI.md).
 
 ## How sections are classified
 

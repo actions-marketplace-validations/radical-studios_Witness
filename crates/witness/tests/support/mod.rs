@@ -10,13 +10,49 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::{Value, json};
 
+/// Environment variables that change what `witness` does (CI detection,
+/// tokens, base branch); tests start without them.
+const AMBIENT: &[&str] = &[
+    "WITNESS_SESSION_ID",
+    "WITNESS_DEBUG",
+    "WITNESS_BASE",
+    "WITNESS_GITHUB_TOKEN",
+    "WITNESS_GITLAB_TOKEN",
+    "GITHUB_ACTIONS",
+    "GITHUB_BASE_REF",
+    "GITHUB_EVENT_PATH",
+    "GITHUB_REF",
+    "GITHUB_REPOSITORY",
+    "GITHUB_SERVER_URL",
+    "GITHUB_API_URL",
+    "GITHUB_STEP_SUMMARY",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITLAB_CI",
+    "GITLAB_TOKEN",
+    "CI_API_V4_URL",
+    "CI_PROJECT_ID",
+    "CI_PROJECT_URL",
+    "CI_MERGE_REQUEST_IID",
+    "CI_MERGE_REQUEST_DIFF_BASE_SHA",
+    "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+];
+
 /// Runs `witness` in `dir` with `stdin`.
 pub fn witness(dir: &Path, args: &[&str], stdin: Option<&str>) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_witness"))
+    witness_env(dir, args, stdin, &[])
+}
+
+/// Runs `witness` with extra environment variables.
+pub fn witness_env(dir: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_witness"));
+    for var in AMBIENT {
+        cmd.env_remove(var);
+    }
+    let mut child = cmd
         .args(args)
         .current_dir(dir)
-        .env_remove("WITNESS_SESSION_ID")
-        .env_remove("WITNESS_DEBUG")
+        .envs(env.iter().copied())
         .env("NO_COLOR", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -320,4 +356,63 @@ pub fn send_hook(repo: &TestRepo, args: &[&str], payload: &Value) {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// A one-thread HTTP server answering requests with scripted responses, for
+/// testing posting through `curl`.
+pub struct FakeApi {
+    pub url: String,
+    handle: Option<std::thread::JoinHandle<Vec<(String, String)>>>,
+}
+
+impl FakeApi {
+    /// Serves `responses` (status, JSON body) in order, then stops.
+    pub fn start(responses: Vec<(u16, String)>) -> Self {
+        use std::io::{BufRead, BufReader, Read};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for (status, body) in responses {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                let mut length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut request_body = vec![0; length];
+                reader.read_exact(&mut request_body).unwrap();
+                seen.push((
+                    request_line.trim().to_owned(),
+                    String::from_utf8(request_body).unwrap(),
+                ));
+                let mut stream = reader.into_inner();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            seen
+        });
+        Self {
+            url,
+            handle: Some(handle),
+        }
+    }
+
+    /// The requests served: request line and body.
+    pub fn requests(mut self) -> Vec<(String, String)> {
+        self.handle.take().unwrap().join().unwrap()
+    }
 }

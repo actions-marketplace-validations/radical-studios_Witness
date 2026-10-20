@@ -1,6 +1,7 @@
 //! The `witness` command-line tool.
 
 mod assume;
+mod ci;
 mod cli;
 mod exec;
 mod hook;
