@@ -26,7 +26,7 @@ teaches the agent to record assumptions:
 
 ```text
 /plugin marketplace add radical-studios/witness
-/plugin install witness@witness
+/plugin install witness@radical-studios
 ```
 
 For a local checkout, `claude --plugin-dir ./plugin/claude-code` loads it

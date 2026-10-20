@@ -1,6 +1,6 @@
 {
-  "name": "witness",
-  "description": "Witness: tells reviewers which parts of an AI-written change were verified and which were guessed.",
+  "name": "radical-studios",
+  "description": "Claude Code plugins from Radical Studios.",
   "owner": {
     "name": "Radical Studios"
   },
