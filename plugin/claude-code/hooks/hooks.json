@@ -1,0 +1,38 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Read|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v witness >/dev/null 2>&1 || exit 0; witness hook post-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v witness >/dev/null 2>&1 || exit 0; witness hook post-tool-use-failure",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v witness >/dev/null 2>&1 || exit 0; witness hook session-end"
+          }
+        ]
+      }
+    ]
+  }
+}
