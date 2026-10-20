@@ -139,9 +139,7 @@ pub fn run(args: HooksArgs) -> Result<()> {
             no_guidance,
         } => {
             for hooks in select(&agents, all)? {
-                if install(&root, hooks, force)? && !no_guidance {
-                    add_guidance(&root, hooks.agent)?;
-                }
+                install_agent(&root, hooks.agent, force, !no_guidance)?;
             }
             Ok(())
         }
@@ -156,6 +154,38 @@ pub fn run(args: HooksArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Installs `agent`'s hooks in `root`, and its guidance with `guidance`;
+/// false if they were skipped.
+pub fn install_agent(root: &Path, agent: &str, force: bool, guidance: bool) -> Result<bool> {
+    let hooks = select(&[agent.to_owned()], false)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("unknown agent {agent:?}"))?;
+    let installed = install(root, hooks, force)?;
+    if installed && guidance {
+        add_guidance(root, hooks.agent)?;
+    }
+    Ok(installed)
+}
+
+/// Each agent's hook state in `root`: `(agent, config file, state)`, where
+/// state is `installed`, `via plugin` or `not installed`.
+pub fn states(root: &Path) -> Vec<(&'static str, &'static str, &'static str)> {
+    AGENTS
+        .iter()
+        .map(|hooks| {
+            let state = if installed(root, hooks) {
+                "installed"
+            } else if hooks.agent == "claude-code" && plugin_enabled(&root.join(hooks.file)) {
+                "via plugin"
+            } else {
+                "not installed"
+            };
+            (hooks.agent, hooks.file, state)
+        })
+        .collect()
 }
 
 /// Agent names `witness hooks install` accepts.
@@ -244,16 +274,8 @@ fn status(root: &Path) {
             |p| p.display().to_string()
         )
     );
-    for hooks in AGENTS {
-        let path = root.join(hooks.file);
-        let state = if installed(root, hooks) {
-            "installed"
-        } else if hooks.agent == "claude-code" && plugin_enabled(&path) {
-            "via plugin"
-        } else {
-            "not installed"
-        };
-        println!("{:<12} {:<14} {}", hooks.agent, state, hooks.file);
+    for (agent, file, state) in states(root) {
+        println!("{agent:<12} {state:<14} {file}");
     }
     let mut files: Vec<&str> = AGENTS
         .iter()
@@ -423,7 +445,7 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
     fs::write(path, text).with_context(|| format!("writing {}", path.display()))
 }
 
-fn which(program: &str) -> Option<PathBuf> {
+pub fn which(program: &str) -> Option<PathBuf> {
     let paths = std::env::var_os("PATH")?;
     std::env::split_paths(&paths).find_map(|dir| {
         [program.to_owned(), format!("{program}.exe")]

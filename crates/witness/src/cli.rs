@@ -53,6 +53,24 @@ pub enum Command {
     /// Show the agent track record: how often agent-written sections were
     /// rewritten or reverted after landing, per agent, area and status.
     Stats(StatsArgs),
+    /// Check that Witness is set up and recording.
+    Doctor,
+    /// Remove old session logs that have landed on the base branch, and
+    /// stale local state.
+    Prune(PruneArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PruneArgs {
+    /// Remove logs whose last event is older than this: 90d, 12w.
+    #[arg(long, default_value = "90d")]
+    pub older_than: String,
+    /// Base branch the logs must have landed on (see `witness report --help`).
+    #[arg(long)]
+    pub base: Option<String>,
+    /// List what would be removed without removing it.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -61,6 +79,25 @@ pub struct InitArgs {
     /// one package of a monorepo.
     #[arg(long)]
     pub here: bool,
+    /// Agents to install hooks for (claude-code, codex, copilot, cursor,
+    /// gemini-cli). Default: the ones this repository or machine uses.
+    #[arg(long, value_delimiter = ',')]
+    pub agents: Vec<String>,
+    /// Don't install agent hooks.
+    #[arg(long, conflicts_with = "agents")]
+    pub no_hooks: bool,
+    /// Add a CI job that posts the review plan on pull or merge requests.
+    #[arg(long, value_enum)]
+    pub ci: Option<CiArg>,
+    /// Install a git pre-commit hook that stages the session logs.
+    #[arg(long)]
+    pub git_hooks: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CiArg {
+    Github,
+    Gitlab,
 }
 
 #[derive(Debug, Args)]

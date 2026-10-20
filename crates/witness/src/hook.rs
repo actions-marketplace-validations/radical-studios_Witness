@@ -113,10 +113,22 @@ fn reply(root: &Path, input: &HookInput, event: &str) {
                 "UserPromptSubmit"
             },
         ),
-        HookEvent::SessionStart => (nudge::pending(root, &input.session_id), "SessionStart"),
+        HookEvent::SessionStart => {
+            let plugin = std::env::var_os("CLAUDE_PLUGIN_ROOT").map(PathBuf::from);
+            let version = nudge::version_check(plugin.as_deref());
+            let pending = nudge::pending(root, &input.session_id);
+            let reply = match (version, pending) {
+                (Some(v), Some(p)) => Some(v.or(p)),
+                (v, p) => v.or(p),
+            };
+            (reply, "SessionStart")
+        }
         _ => return,
     };
-    if let Some(text) = reply.and_then(|r| nudge::render(&input.agent, name, &r)) {
+    if let Some(text) = reply
+        .filter(|r| !r.is_empty())
+        .and_then(|r| nudge::render(&input.agent, name, &r))
+    {
         println!("{text}");
     }
 }

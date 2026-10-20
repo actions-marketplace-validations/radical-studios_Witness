@@ -13,7 +13,7 @@ pub use witness_core::config::{CONFIG_FILE, WITNESS_DIR};
 pub const SESSIONS_DIR: &str = ".witness/sessions";
 pub const STATE_DIR: &str = ".witness/state";
 const CURRENT_SESSION: &str = ".witness/state/current-session";
-const HOOK_LOG: &str = ".witness/state/hook.log";
+pub const HOOK_LOG: &str = ".witness/state/hook.log";
 /// The hook log is trimmed to its newest half once it grows past this.
 const HOOK_LOG_MAX_BYTES: u64 = 64 * 1024;
 
@@ -90,9 +90,11 @@ pub fn log_hook(root: &Path, message: &str) {
         }
         if fs::metadata(&path).is_ok_and(|m| m.len() > HOOK_LOG_MAX_BYTES) {
             let text = fs::read_to_string(&path).unwrap_or_default();
+            // Cut after a newline byte, which is always a char boundary.
             let half = text.len() / 2;
-            let keep = text[half..]
-                .find('\n')
+            let keep = text.as_bytes()[half..]
+                .iter()
+                .position(|&b| b == b'\n')
                 .map_or("", |i| &text[half + i + 1..]);
             fs::write(&path, keep)?;
         }
@@ -253,6 +255,14 @@ mod tests {
         let text = fs::read_to_string(tmp.path().join(HOOK_LOG)).unwrap();
         assert!(text.len() as u64 <= HOOK_LOG_MAX_BYTES + 2000);
         assert!(text.lines().all(|l| l.ends_with(&line)));
+
+        // Multi-byte text is cut at a line boundary, not inside a char.
+        let wide = "é".repeat(777);
+        for _ in 0..200 {
+            log_hook(tmp.path(), &wide);
+        }
+        let text = fs::read_to_string(tmp.path().join(HOOK_LOG)).unwrap();
+        assert!(text.lines().last().unwrap().ends_with(&wide));
     }
 
     #[test]

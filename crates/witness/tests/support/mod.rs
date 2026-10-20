@@ -123,9 +123,10 @@ impl TestRepo {
         Self { _tmp: tmp, path }
     }
 
-    /// Runs `witness init` and checks it wrote the config.
+    /// Runs `witness init` (without agent hooks) and checks it wrote the
+    /// config.
     pub fn init_witness(&self) {
-        stdout_of(&self.witness(&["init"], None));
+        stdout_of(&self.witness(&["init", "--no-hooks"], None));
         assert!(self.path.join("witness.toml").is_file());
     }
 

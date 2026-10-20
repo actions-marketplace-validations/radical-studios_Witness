@@ -26,15 +26,51 @@ use crate::pipeline::Repo;
 use crate::review;
 use crate::workspace::{self, STATE_DIR};
 
-/// What to tell the agent and the user.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reply {
+/// What a hook tells the user and the agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reply {
     /// A note for the user; the agent doesn't see it.
-    Remind(String),
-    /// Ask the agent to continue, with this reason.
-    Block(String),
+    pub message: Option<String>,
     /// Context for the agent at the start of a turn.
-    Context(String),
+    pub context: Option<String>,
+    /// Ask the agent to continue, with this reason.
+    pub block: Option<String>,
+}
+
+impl Reply {
+    pub fn message(text: String) -> Self {
+        Self {
+            message: Some(text),
+            ..Self::default()
+        }
+    }
+
+    pub fn context(text: String) -> Self {
+        Self {
+            context: Some(text),
+            ..Self::default()
+        }
+    }
+
+    pub fn block(reason: String) -> Self {
+        Self {
+            block: Some(reason),
+            ..Self::default()
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.message.is_none() && self.context.is_none() && self.block.is_none()
+    }
+
+    /// Both replies' parts, `other`'s taking the place of missing ones.
+    pub fn or(self, other: Reply) -> Reply {
+        Reply {
+            message: self.message.or(other.message),
+            context: self.context.or(other.context),
+            block: self.block.or(other.block),
+        }
+    }
 }
 
 /// Sections listed in a nudge.
@@ -131,7 +167,7 @@ pub fn on_stop(
             "Run the tests or build that cover them (without piping their output), or say in your \
              reply why they can't be checked.",
         );
-        return Ok(Some(Reply::Block(reason)));
+        return Ok(Some(Reply::block(reason)));
     }
     if mode == NudgeMode::Off {
         return Ok(None);
@@ -169,7 +205,7 @@ pub fn on_stop(
         }
     }
     note.push_str(". Run `witness status` for details.");
-    Ok(Some(Reply::Remind(note)))
+    Ok(Some(Reply::message(note)))
 }
 
 /// At the start of a turn, or when a session resumes: the reminder left by
@@ -178,7 +214,25 @@ pub fn pending(root: &Path, session: &str) -> Option<Reply> {
     let path = reminder_path(root, session, "txt");
     let text = fs::read_to_string(&path).ok()?;
     let _ = fs::rename(&path, reminder_path(root, session, "seen"));
-    Some(Reply::Context(text))
+    Some(Reply::context(text))
+}
+
+/// When a session starts from the Claude Code plugin: a note if the plugin
+/// and the binary are different releases (`plugin_root` is
+/// `$CLAUDE_PLUGIN_ROOT`).
+pub fn version_check(plugin_root: Option<&Path>) -> Option<Reply> {
+    let manifest = plugin_root?.join(".claude-plugin").join("plugin.json");
+    let text = fs::read_to_string(manifest).ok()?;
+    let plugin: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let plugin = plugin.get("version")?.as_str()?;
+    let binary = env!("CARGO_PKG_VERSION");
+    let release = |v: &str| v.split('.').take(2).collect::<Vec<_>>().join(".");
+    (release(plugin) != release(binary)).then(|| {
+        Reply::message(format!(
+            "Witness: the plugin ({plugin}) and the witness binary ({binary}) are different \
+             releases; update both (`/plugin update witness`, and install.sh for the binary)."
+        ))
+    })
 }
 
 fn reminder_path(root: &Path, session: &str, ext: &str) -> PathBuf {
@@ -207,27 +261,34 @@ fn listing(sections: &[&Section]) -> String {
     lines.join("\n")
 }
 
-/// The reply in the agent's hook output format; `None` when the agent
-/// can't take it. `event` is the agent's name for the hook event.
+/// The reply in the agent's hook output format; `None` when there is
+/// nothing the agent can take. `event` is the agent's name for the hook
+/// event.
 pub fn render(agent: &str, event: &str, reply: &Reply) -> Option<String> {
-    let text = match (agent, reply) {
-        ("claude-code" | "codex" | "gemini-cli" | "generic", Reply::Remind(note)) => {
-            json!({ "systemMessage": note }).to_string()
-        }
-        ("claude-code" | "codex" | "copilot" | "gemini-cli" | "generic", Reply::Block(reason)) => {
-            json!({ "decision": "block", "reason": reason }).to_string()
-        }
-        ("cursor", Reply::Block(reason)) => json!({ "followup_message": reason }).to_string(),
-        // Claude Code adds a prompt or session-start hook's plain output to
-        // the agent's context.
-        ("claude-code", Reply::Context(text)) => text.clone(),
-        ("codex" | "gemini-cli", Reply::Context(text)) => json!({
-            "hookSpecificOutput": { "hookEventName": event, "additionalContext": text }
-        })
-        .to_string(),
-        _ => return None,
-    };
-    Some(text)
+    if let Some(reason) = &reply.block {
+        return Some(
+            match agent {
+                "cursor" => json!({ "followup_message": reason }),
+                _ => json!({ "decision": "block", "reason": reason }),
+            }
+            .to_string(),
+        );
+    }
+    // Copilot and Cursor ignore the output of these hooks.
+    if matches!(agent, "copilot" | "cursor") {
+        return None;
+    }
+    let mut out = serde_json::Map::new();
+    if let Some(message) = &reply.message {
+        out.insert("systemMessage".into(), json!(message));
+    }
+    if let Some(context) = &reply.context {
+        out.insert(
+            "hookSpecificOutput".into(),
+            json!({ "hookEventName": event, "additionalContext": context }),
+        );
+    }
+    (!out.is_empty()).then(|| serde_json::Value::Object(out).to_string())
 }
 
 #[cfg(test)]
@@ -236,7 +297,7 @@ mod tests {
 
     #[test]
     fn renders_per_agent() {
-        let block = Reply::Block("check it".into());
+        let block = Reply::block("check it".into());
         assert_eq!(
             render("claude-code", "Stop", &block).unwrap(),
             r#"{"decision":"block","reason":"check it"}"#
@@ -245,21 +306,40 @@ mod tests {
             render("cursor", "stop", &block).unwrap(),
             r#"{"followup_message":"check it"}"#
         );
-        let remind = Reply::Remind("note".into());
+        let remind = Reply::message("note".into());
         assert_eq!(
             render("codex", "Stop", &remind).unwrap(),
             r#"{"systemMessage":"note"}"#
         );
         assert_eq!(render("copilot", "agentStop", &remind), None);
-        let context = Reply::Context("ctx".into());
+        let context = Reply::context("ctx".into());
         assert_eq!(
             render("claude-code", "UserPromptSubmit", &context).unwrap(),
-            "ctx"
+            r#"{"hookSpecificOutput":{"additionalContext":"ctx","hookEventName":"UserPromptSubmit"}}"#
         );
-        assert!(
-            render("codex", "UserPromptSubmit", &context)
-                .unwrap()
-                .contains(r#""hookEventName":"UserPromptSubmit""#)
-        );
+        let both = Reply::message("note".into()).or(context);
+        let out = render("gemini-cli", "SessionStart", &both).unwrap();
+        assert!(out.contains(r#""systemMessage":"note""#), "{out}");
+        assert!(out.contains(r#""hookEventName":"SessionStart""#), "{out}");
+        assert_eq!(render("claude-code", "Stop", &Reply::default()), None);
+    }
+
+    #[test]
+    fn checks_the_plugin_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join(".claude-plugin");
+        fs::create_dir_all(&manifest).unwrap();
+        let release: Vec<&str> = env!("CARGO_PKG_VERSION").split('.').collect();
+        let same = format!("{}.{}.99", release[0], release[1]);
+        fs::write(
+            manifest.join("plugin.json"),
+            format!(r#"{{"version":"{same}"}}"#),
+        )
+        .unwrap();
+        assert_eq!(version_check(Some(dir.path())), None);
+        fs::write(manifest.join("plugin.json"), r#"{"version":"0.0.1"}"#).unwrap();
+        let note = version_check(Some(dir.path())).unwrap().message.unwrap();
+        assert!(note.contains("(0.0.1)"), "{note}");
+        assert_eq!(version_check(None), None);
     }
 }

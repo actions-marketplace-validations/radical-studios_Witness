@@ -3,6 +3,7 @@
 mod assume;
 mod ci;
 mod cli;
+mod doctor;
 mod exec;
 mod guidance;
 mod history;
@@ -11,6 +12,7 @@ mod hooks;
 mod init;
 mod nudge;
 mod pipeline;
+mod prune;
 mod record;
 mod review;
 mod snapshot;
@@ -64,6 +66,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Explain(args) => ok(review::run_explain(args)),
         Command::Sessions(args) => ok(review::run_sessions(args)),
         Command::Stats(args) => ok(history::run_stats(args)),
+        Command::Doctor => doctor::run(),
+        Command::Prune(args) => ok(prune::run(args)),
         Command::Post(args) => review::run_post(args),
     }
 }

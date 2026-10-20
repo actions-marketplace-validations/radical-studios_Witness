@@ -41,7 +41,11 @@ fn witness_root_below_the_git_top_level() {
     repo.write("other/lib.rs", "fn b() {}\n");
     repo.commit_all("base");
     let pkg = repo.abs("pkg/app");
-    support::stdout_of(&support::witness(&pkg, &["init", "--here"], None));
+    support::stdout_of(&support::witness(
+        &pkg,
+        &["init", "--here", "--no-hooks"],
+        None,
+    ));
     assert!(pkg.join("witness.toml").is_file());
     repo.commit_all("set up witness in the package");
     repo.git(&["checkout", "-q", "-b", "feature"]);
@@ -961,4 +965,132 @@ fn track_record_from_landed_changes() {
     );
     let markdown = repo.report_markdown("main", "HEAD");
     assert!(markdown.contains("Track record: 67% of 3"), "{markdown}");
+}
+
+/// `witness init` sets up the agents' hooks and guidance, the CI job, the
+/// git attributes and a pre-commit hook that stages session logs; running
+/// it again changes nothing.
+#[test]
+fn init_sets_up_agents_ci_and_git() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", "fn a() {}\n");
+    repo.write("AGENTS.md", "# Agents\n\nUse tabs.\n");
+    let args = [
+        "init",
+        "--agents",
+        "codex,copilot",
+        "--ci",
+        "github",
+        "--git-hooks",
+    ];
+    let out = support::stdout_of(&repo.witness(&args, None));
+    assert!(
+        out.contains("wrote codex hooks to .codex/hooks.json"),
+        "{out}"
+    );
+    assert!(repo.abs(".github/hooks/witness.json").is_file());
+    assert!(repo.abs(".github/workflows/witness.yml").is_file());
+    let agents_md = repo.read("AGENTS.md");
+    assert!(agents_md.starts_with("# Agents\n\nUse tabs.\n\n<!-- witness:begin -->"));
+    assert_eq!(
+        repo.read(".gitattributes"),
+        ".witness/sessions/** linguist-generated=true merge=union\n"
+    );
+
+    let again = support::stdout_of(&repo.witness(&args, None));
+    assert!(again.contains("kept the existing witness.toml"), "{again}");
+    assert!(again.contains("already stages session logs"), "{again}");
+    assert_eq!(repo.read("AGENTS.md"), agents_md);
+    assert_eq!(repo.read(".gitattributes").lines().count(), 1);
+    repo.commit_all("set up witness");
+
+    // The pre-commit hook adds the session log to a commit that forgot it.
+    repo.claude("s1")
+        .edit("src/lib.rs", "fn a() {}", "fn a() { 1; }");
+    repo.git(&["add", "src/lib.rs"]);
+    repo.git(&["commit", "-q", "-m", "change"]);
+    let files = repo.git(&["show", "--name-only", "--format=", "HEAD"]);
+    assert!(files.contains(".witness/sessions/s1.jsonl"), "{files}");
+}
+
+/// `witness doctor` reports the setup and what was recorded, and fails
+/// outside a Witness repository.
+#[test]
+fn doctor_checks_the_setup() {
+    let repo = TestRepo::new();
+    // A home without Claude Code settings or plugins.
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().to_str().unwrap();
+    let doctor = || {
+        support::witness_env(
+            &repo.path,
+            &["doctor"],
+            None,
+            &[("HOME", home), ("USERPROFILE", home)],
+        )
+    };
+    repo.write("src/lib.rs", "fn a() {}\n");
+    let out = doctor();
+    assert!(!out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("✗ no .witness/ directory"), "{text}");
+
+    repo.init_witness();
+    repo.commit_all("base");
+    let text = support::stdout_of(&doctor());
+    assert!(text.contains("✓ config:"), "{text}");
+    assert!(text.contains("no sessions recorded yet"), "{text}");
+    assert!(text.contains("no agent hooks installed"), "{text}");
+
+    repo.claude("s1")
+        .edit("src/lib.rs", "fn a() {}", "fn a() { 1; }");
+    let text = support::stdout_of(&doctor());
+    assert!(
+        text.contains("1 session log; last recorded: claude-code just now"),
+        "{text}"
+    );
+    assert!(text.contains("1 session log not committed yet"), "{text}");
+}
+
+/// `witness prune` removes only old logs that have landed on the base.
+#[test]
+fn prune_removes_landed_logs() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", "fn a() {}\nfn b() {}\n");
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.claude("landed")
+        .edit("src/lib.rs", "fn a() {}", "fn a() { 1; }");
+    repo.claude("growing")
+        .edit("src/lib.rs", "fn b() {}", "fn b() { 2; }");
+    repo.commit_all("agent work");
+    // This one has events the base doesn't have yet.
+    repo.claude("growing").read("src/lib.rs");
+
+    let dry = support::stdout_of(&repo.witness(
+        &["prune", "--older-than", "0d", "--base", "main", "--dry-run"],
+        None,
+    ));
+    assert!(
+        dry.contains("would remove .witness/sessions/landed.jsonl"),
+        "{dry}"
+    );
+    assert!(repo.abs(".witness/sessions/landed.jsonl").exists());
+
+    let out =
+        support::stdout_of(&repo.witness(&["prune", "--older-than", "0d", "--base", "main"], None));
+    assert!(
+        out.contains("removed 1 session log; commit the deletion"),
+        "{out}"
+    );
+    assert!(!repo.abs(".witness/sessions/landed.jsonl").exists());
+    assert!(repo.abs(".witness/sessions/growing.jsonl").exists());
+
+    // Recent logs stay.
+    repo.commit_all("prune");
+    let out = support::stdout_of(&repo.witness(&["prune", "--base", "main"], None));
+    assert!(
+        out.contains("no landed session logs older than 90 days"),
+        "{out}"
+    );
 }
