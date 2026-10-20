@@ -34,8 +34,9 @@ and writes the plan to the job summary.
 | `base` | the PR's base branch | Ref to compare with. |
 | `comment` | `true` | Post or update the comment; with `false`, only the job summary is written. |
 | `annotations` | `true` | Inline annotations for close-review sections. |
-| `fail-on` | | Statuses or signals that fail the step: `failing`, `guessed`, `unrecorded`, `unverified`, `compiled`, `tested`, `test-changed-after-failure`, `assertions-removed`, `high-risk-area`, `blind-edit`, `thrash`, `filtered-test-run`, `human-modified`. |
+| `fail-on` | | Statuses or signals that fail the step: `failing`, `guessed`, `unrecorded`, `unverified`, `compiled`, `tested`, `test-changed-after-failure`, `assertions-removed`, `high-risk-area`, `blind-edit`, `thrash`, `filtered-test-run`, `human-modified`, `rewritten-often`. |
 | `token` | `github.token` | Token for commenting. |
+| `cache-history` | `true` | Keep the agent track record (`.witness/state/history.json`) in the Actions cache, so history is examined once rather than on every run. |
 
 **Pull requests from forks** run with a read-only token, so the comment
 can't be posted. Witness then prints a warning, keeps the plan in the job
@@ -94,6 +95,15 @@ self-hosted servers.
   head commit.
 - A shallow clone can lack the merge base; Witness says so and asks for
   `fetch-depth: 0` (GitHub) or `GIT_DEPTH: 0` (GitLab).
+
+## Track record
+
+Reports include the agents' track record on the base branch (see
+`witness stats`). It needs the base branch's history, which `fetch-depth: 0`
+provides, and is cached in `.witness/state/history.json`: the GitHub Action
+and the GitLab template keep that file in the CI cache. Elsewhere, cache it
+yourself or accept that the first run on a fresh clone examines up to
+`[history] max_changes` landed changes (about 25 ms each).
 
 ## How posting works
 

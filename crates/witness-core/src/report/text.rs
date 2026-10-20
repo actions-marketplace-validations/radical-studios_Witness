@@ -116,6 +116,21 @@ impl Report {
         if s.sections == 0 {
             let _ = writeln!(out, "  No agent-written sections.");
         }
+        let t = &self.track_record;
+        if t.available {
+            let _ = writeln!(out);
+            let _ = writeln!(
+                out,
+                "{}",
+                paint(DIM, &format!("Track record: {}", t.message))
+            );
+            if let Some(calibration) = &t.calibration {
+                let _ = writeln!(out, "{}", paint(DIM, calibration));
+            }
+            for record in &t.records {
+                let _ = writeln!(out, "{}", paint(DIM, &format!("  {}", record.describe())));
+            }
+        }
         out
     }
 }

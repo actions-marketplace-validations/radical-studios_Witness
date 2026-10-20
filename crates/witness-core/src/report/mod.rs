@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use crate::claims::Claim;
 use crate::classify::{Classifier, ClassifyContext, Evidence, Status, Verdict};
 use crate::config::Config;
-use crate::history::{HistoryStore, HunkFingerprint};
+use crate::history::{History, HunkFingerprint, MIN_SAMPLES_SHOWN, TrackRecord, percent};
 use crate::hunk::Hunk;
 use crate::provenance::{self, Segment};
 use crate::record::{CommandClass, Event, EventKind};
@@ -169,8 +169,64 @@ pub struct Section {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackRecordNote {
+    /// Whether any history was available.
     pub available: bool,
     pub message: String,
+    /// Records of the agents and areas in this report, where there are
+    /// enough samples.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<TrackRecord>,
+    /// How well flags predicted rewrites, when there are enough samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<String>,
+}
+
+impl TrackRecordNote {
+    fn new(history: &History, sections: &[&Section]) -> Self {
+        if history.is_empty() {
+            return Self {
+                available: false,
+                message: "No track record yet.".to_owned(),
+                records: Vec::new(),
+                calibration: None,
+            };
+        }
+        let mut records: Vec<TrackRecord> = Vec::new();
+        for s in sections {
+            let Some(agent) = &s.agent else { continue };
+            if records
+                .iter()
+                .any(|r| &r.agent == agent && r.area == s.area)
+            {
+                continue;
+            }
+            if let Some(record) = history.track_record(agent, &s.area)
+                && record.tally.samples >= MIN_SAMPLES_SHOWN
+            {
+                records.push(record);
+            }
+        }
+        records.sort_by_key(|r| std::cmp::Reverse(r.tally.samples));
+        let changes = history.changes();
+        let overall = history.overall();
+        Self {
+            available: true,
+            message: format!(
+                "{} of {} agent-written {} from {changes} earlier {} rewritten or reverted within {} days.",
+                percent(overall.churn()),
+                overall.samples,
+                if overall.samples == 1 {
+                    "section"
+                } else {
+                    "sections"
+                },
+                if changes == 1 { "change" } else { "changes" },
+                history.horizon_days
+            ),
+            records,
+            calibration: history.calibration().sentence(history.horizon_days),
+        }
+    }
 }
 
 /// Everything the report is computed from.
@@ -185,7 +241,8 @@ pub struct ReportInput<'a> {
     pub skipped_lines: usize,
     pub config: &'a Config,
     pub classifier: &'a dyn Classifier,
-    pub history: &'a dyn HistoryStore,
+    /// Outcomes of earlier changes, for the track record.
+    pub history: &'a History,
     /// Package lookups at head, to tell what a scoped test run covers.
     pub packages: &'a dyn Packages,
     /// For lines no recorded agent edit wrote: the agent their commit is
@@ -273,7 +330,23 @@ pub fn analyze(input: ReportInput<'_>) -> Analysis {
         summary.lines.agent += lines_added;
 
         let human_nearby = segment.by_agent() && human_hunks.contains(&segment.hunk);
-        let signals = signals::for_segment(segment, &verdict, human_nearby, &timeline, config);
+        let mut signals = signals::for_segment(segment, &verdict, human_nearby, &timeline, config);
+        let area = config.area_for(&segment.file);
+        if let Some(record) = verdict
+            .agent
+            .as_deref()
+            .and_then(|agent| input.history.weak_spot(agent, area))
+        {
+            signals.push(Signal {
+                kind: SignalKind::RewrittenOften,
+                detail: format!(
+                    "{} of {}'s {} sections rewritten or reverted",
+                    percent(record.tally.churn()),
+                    record.agent,
+                    record.area
+                ),
+            });
+        }
         let close =
             config.closes(verdict.status) || signals.iter().any(|s| config.escalates(s.kind));
         let score = verdict.status.weight()
@@ -297,7 +370,7 @@ pub fn analyze(input: ReportInput<'_>) -> Analysis {
             status: verdict.status,
             reason: verdict.reason,
             agent: verdict.agent,
-            area: config.area_for(&segment.file).to_owned(),
+            area: area.to_owned(),
             signals,
             score,
             evidence: verdict.evidence,
@@ -344,19 +417,8 @@ pub fn build(input: ReportInput<'_>) -> Report {
     };
     summary.review_closely = flagged.len();
 
-    let any_record = flagged.iter().chain(&skim).any(|s| {
-        s.agent
-            .as_deref()
-            .is_some_and(|agent| matches!(history.track_record(agent, &s.area), Ok(Some(_))))
-    });
-    let track_record = TrackRecordNote {
-        available: any_record,
-        message: if any_record {
-            "Track record available but not yet used in this version.".to_owned()
-        } else {
-            "No track record yet.".to_owned()
-        },
-    };
+    let all: Vec<&Section> = flagged.iter().chain(&over_cap).chain(&skim).collect();
+    let track_record = TrackRecordNote::new(history, &all);
 
     Report {
         schema_version: REPORT_SCHEMA_VERSION,
@@ -556,7 +618,6 @@ fn encode_path_segment(segment: &str) -> String {
 mod tests {
     use super::*;
     use crate::classify::DefaultRules;
-    use crate::history::NullHistoryStore;
     use crate::record::{Change, LineRange};
     use crate::scope::NoPackages;
     use time::Duration;
@@ -619,6 +680,10 @@ mod tests {
     const D: [&str; 1] = ["validate_input(&request)?;"];
 
     fn sample(max_flagged: usize) -> Report {
+        sample_with(max_flagged, &History::default())
+    }
+
+    fn sample_with(max_flagged: usize, history: &History) -> Report {
         let hunks = vec![
             hunk("src/a.rs", 1, &A1),
             hunk("src/a.rs", 20, &A2),
@@ -654,10 +719,80 @@ mod tests {
             skipped_lines: 0,
             config: &config,
             classifier: &DefaultRules,
-            history: &NullHistoryStore,
+            history,
             packages: &NoPackages,
             commit_agent: &no_commit_agent,
         })
+    }
+
+    #[test]
+    fn uses_the_track_record() {
+        use crate::history::{HistoryEntry, Outcome};
+        let entry = |agent: &str, status: Status, outcome: Outcome| HistoryEntry {
+            commit: format!("{agent}-commit"),
+            landed_at: datetime!(2026-01-01 00:00:00 UTC),
+            file: "src/x.rs".into(),
+            agent: agent.into(),
+            area: "default".into(),
+            status,
+            lines: 4,
+            outcome,
+        };
+        let mut entries = Vec::new();
+        for _ in 0..30 {
+            entries.push(entry("codex", Status::Tested, Outcome::Survived));
+        }
+        for i in 0..12 {
+            let outcome = if i < 6 {
+                Outcome::Rewritten
+            } else {
+                Outcome::Survived
+            };
+            entries.push(entry("claude-code", Status::Unverified, outcome));
+        }
+        let history = History {
+            horizon_days: 30,
+            entries,
+        };
+        let report = sample_with(10, &history);
+        let t = &report.track_record;
+        assert!(t.available);
+        assert_eq!(
+            t.message,
+            "14% of 42 agent-written sections from 2 earlier changes rewritten or reverted within 30 days."
+        );
+        assert_eq!(t.records.len(), 1);
+        assert_eq!(
+            t.records[0].describe(),
+            "claude-code in default: 50% of 12 sections rewritten or reverted"
+        );
+        assert!(
+            t.calibration
+                .as_deref()
+                .unwrap()
+                .contains("more often than tested ones")
+        );
+        // claude-code's sections here carry the weak spot as a signal.
+        let a = report
+            .flagged
+            .iter()
+            .find(|s| s.file == "src/a.rs")
+            .unwrap();
+        let signal = a
+            .signals
+            .iter()
+            .find(|g| g.kind == SignalKind::RewrittenOften)
+            .unwrap();
+        assert_eq!(
+            signal.detail,
+            "50% of claude-code's default sections rewritten or reverted"
+        );
+        let md = report.to_markdown();
+        assert!(md.contains("<summary>Track record</summary>"), "{md}");
+        assert!(
+            md.contains("- claude-code in default: 50% of 12 sections"),
+            "{md}"
+        );
     }
 
     #[test]
@@ -838,7 +973,7 @@ mod tests {
             skipped_lines: 0,
             config: &config,
             classifier: &DefaultRules,
-            history: &NullHistoryStore,
+            history: &History::default(),
             packages: &NoPackages,
             commit_agent: &no_commit_agent,
         });

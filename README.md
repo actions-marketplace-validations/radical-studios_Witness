@@ -96,6 +96,10 @@ Other commands:
 - `witness explain src/parse.rs:42` shows who wrote a line, how, and which
   checks ran after it.
 - `witness sessions` lists the agent sessions recorded on the branch.
+- `witness stats` shows the agent track record: how often agent-written
+  sections were rewritten or reverted within 30 days of landing, per agent,
+  area and status, and whether sections Witness flagged were rewritten more
+  often than tested ones. Reports include it once there is history.
 - `witness report --format json|text|sarif|github|gitlab-codequality`
   prints the same data for tools: SARIF for code scanning, `github` for
   inline annotations in GitHub Actions, `gitlab-codequality` for GitLab's
@@ -164,8 +168,9 @@ the `parser` crate, `go test ./internal/x/...` only that directory, and
 
 Sections also carry signals, such as a test edited right after it failed,
 assertions removed from a test, an edit to a file the agent never read, the
-same lines rewritten over and over, a filtered test run, or a change in a
-`risk = "high"` area. The first two and the high-risk area put a section up
+same lines rewritten over and over, a filtered test run, a change in a
+`risk = "high"` area, or an agent whose earlier changes in this area were
+often rewritten. The first two and the high-risk area put a section up
 for close review whatever its status (`[report] escalate` in
 `witness.toml`).
 

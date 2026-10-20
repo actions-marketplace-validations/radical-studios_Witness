@@ -50,6 +50,9 @@ pub enum Command {
     Sessions(SessionsArgs),
     /// Post the review plan to a code review platform.
     Post(PostArgs),
+    /// Show the agent track record: how often agent-written sections were
+    /// rewritten or reverted after landing, per agent, area and status.
+    Stats(StatsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -219,6 +222,19 @@ pub struct ExplainArgs {
     /// Base ref (see `witness report --help`).
     #[arg(long)]
     pub base: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct StatsArgs {
+    /// Base branch whose history is examined (see `witness report --help`).
+    #[arg(long)]
+    pub base: Option<String>,
+    /// Print JSON instead of tables.
+    #[arg(long)]
+    pub json: bool,
+    /// Only read the cache in .witness/state/; don't examine new history.
+    #[arg(long)]
+    pub cached: bool,
 }
 
 #[derive(Debug, Args)]

@@ -152,7 +152,8 @@ After recording, hooks for turn events may print one JSON reply on stdout
    Every segment gets a one-line reason, the run that decided it, and
    signals (`witness-core/src/signals.rs`): `test-changed-after-failure`,
    `assertions-removed`, `high-risk-area`, `blind-edit`, `thrash`,
-   `filtered-test-run`, `human-modified`. `[report] close` lists the
+   `filtered-test-run`, `human-modified`, `rewritten-often` (from the
+   track record, below). `[report] close` lists the
    statuses to review closely and `[report] escalate` the signals that add
    a section to them. `lint` commands don't verify behavior and are ignored.
 6. **Report.** Sections for close review, highest score first (status
@@ -220,27 +221,39 @@ and job summary file from the environment (`GITHUB_EVENT_PATH`,
 forks, is a warning: the plan stays in the job summary and annotations.
 See [CI.md](CI.md).
 
-## Track record (interfaces only)
+## Track record
 
-Later, Witness learns how each agent's changes fare per area of the codebase
-from git history: hunks that are reverted or rewritten soon after merge count
-against the agent in that area, and flags are weighted accordingly.
+Witness learns from git history how each agent's changes fared after they
+landed, per area of the codebase, and how well its own flags predicted that.
 
-- `HunkFingerprint { path, content_hash }`: `content_hash` is SHA-256 of the
-  hunk's added lines with each line trimmed, blank lines dropped, joined with
-  `\n`. History is keyed by this, never by commit SHA, so squash and rebase
-  merges (which change SHAs but not content) don't break it.
-- `Area`: named path globs from `witness.toml`; a hunk's area is the first
-  matching entry, else `default`.
-- `HistoryEntry { fingerprint, agent, area, outcome, observed_at }` with
-  `Outcome::{Survived, Rewritten, Reverted}`.
-- `TrackRecord { agent, area, samples, rewritten, reverted }`.
-- `trait HistoryStore { fn record(..); fn track_record(agent, area) }`;
-  `NullHistoryStore` returns nothing, so the report says
-  "No track record yet."
+- **Landed changes** are the commits on the base branch's first-parent
+  chain that changed `.witness/sessions/`: the merge or squash commits of
+  agent work (`[history] max_changes`, default 200, most recent first).
+  Each is analyzed like a report on `commit^..commit`, which yields its
+  agent-written sections, their status when they landed, and the hashes of
+  their distinctive lines.
+- **Outcomes** are judged at the horizon, the last first-parent commit
+  `[history] horizon_days` (default 30) after landing: *reverted* if a
+  revert commit names the landing commit by then, else *survived* if at
+  least 80% of the section's line hashes are still in the file (renames
+  followed), else *rewritten*. Changes inside their horizon are pending.
+- **Cache**: `.witness/state/history.json` keeps each change's sections and
+  outcomes, so a change is analyzed once and judged once. Reports update it
+  incrementally; `witness status` and the hooks only read it. The GitHub
+  Action caches it between runs.
+- **Use** (`witness-core/src/history.rs`, pure): `History` aggregates
+  `TrackRecord`s per (agent, area) and a `Calibration` that compares how
+  often sections flagged for close review were rewritten or reverted with
+  tested ones. Reports show the overall rate, the records of the agents
+  and areas in the change (5+ samples), and the calibration sentence (10+
+  samples on each side). A section whose agent's record in its area is
+  notably worse than the repository's (10+ samples, churn at least 25% and
+  1.5 times the overall rate) gets the `rewritten-often` signal.
+  `witness stats` prints the whole record.
 
-`witness-git` already exposes `log` and `blame` for the future history
-builder.
+`HunkFingerprint { path, content_hash }` (SHA-256 of a hunk's trimmed,
+non-blank added lines) identifies a section's content independently of
+commit SHAs.
 
 ## Configuration (`witness.toml`)
 
@@ -250,6 +263,9 @@ max_flagged = 10          # cap on sections flagged for close review
 
 [nudge]
 mode = "remind"           # remind | block | off, at the end of each turn
+
+[history]
+horizon_days = 30         # sections are judged this long after landing
 
 [commands]                # regexes, matched against each simple command
 test  = ['^cargo (\+\S+ )?(test|nextest)\b', ...]

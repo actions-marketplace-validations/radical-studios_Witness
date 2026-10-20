@@ -24,6 +24,9 @@ inputs:
   token:
     description: Token for commenting; needs pull-requests write permission.
     default: ${{ github.token }}
+  cache-history:
+    description: Cache the agent track record between runs, so history is examined once ("true" or "false").
+    default: "true"
 
 runs:
   using: composite
@@ -46,6 +49,13 @@ runs:
       run: |
         & "$env:GITHUB_ACTION_PATH\install.ps1"
         Add-Content -Path $env:GITHUB_PATH -Value $env:WITNESS_INSTALL_DIR
+    - name: Cache the track record
+      if: inputs.cache-history == 'true'
+      uses: actions/cache@v4
+      with:
+        path: "**/.witness/state/history.json"
+        key: witness-history-${{ github.base_ref || github.ref_name }}-${{ github.run_id }}
+        restore-keys: witness-history-${{ github.base_ref || github.ref_name }}-
     - name: Review plan
       shell: bash
       env:

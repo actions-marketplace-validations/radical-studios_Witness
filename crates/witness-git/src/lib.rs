@@ -65,6 +65,18 @@ pub trait Git {
     fn blame(&self, rev: &str, path: &str, range: LineRange) -> Result<Vec<BlameLine>, GitError>;
     /// A commit's `author <email>`, `committer <email>` and full message,
     /// one after the other.
+    /// Paths under `dir` that differ between `from` and `to` (a commit, or
+    /// with `None` the working tree, untracked files included). `None` when
+    /// unknown, which callers treat as "any of them".
+    fn changed_paths(
+        &self,
+        _from: &str,
+        _to: Option<&str>,
+        _dir: &str,
+    ) -> Result<Option<Vec<String>>, GitError> {
+        Ok(None)
+    }
+
     fn commit_text(&self, _sha: &str) -> Result<Option<String>, GitError> {
         Ok(None)
     }
@@ -183,6 +195,100 @@ impl GitCli {
     pub fn is_shallow(&self) -> bool {
         self.run(&["rev-parse", "--is-shallow-repository"])
             .is_ok_and(|out| out.trim() == "true")
+    }
+
+    /// Commits on the first-parent chain of `rev`, newest first, as
+    /// `(sha, committer time in Unix seconds)`. With `path`, only commits
+    /// that changed it relative to their first parent; with `max`, at most
+    /// that many.
+    pub fn first_parent(
+        &self,
+        rev: &str,
+        path: Option<&str>,
+        max: Option<usize>,
+    ) -> Result<Vec<(String, i64)>, GitError> {
+        let max = max.map(|n| format!("-n{n}"));
+        let mut args = vec!["log", "--first-parent", "--format=%H %ct"];
+        args.extend(max.as_deref());
+        args.push(rev);
+        if let Some(path) = path {
+            args.extend(["--", path]);
+        }
+        self.run(&args)?
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                let (sha, time) = line
+                    .split_once(' ')
+                    .ok_or_else(|| GitError::Parse(format!("log line: {line}")))?;
+                let time = time
+                    .parse()
+                    .map_err(|_| GitError::Parse(format!("log line: {line}")))?;
+                Ok((sha.to_owned(), time))
+            })
+            .collect()
+    }
+
+    /// The newest commit on the first-parent chain of `rev` committed at or
+    /// before `time` (Unix seconds).
+    pub fn first_parent_at(&self, rev: &str, time: i64) -> Result<Option<String>, GitError> {
+        let before = format!("--before={time}");
+        let out = self.run(&["log", "--first-parent", "-n1", "--format=%H", &before, rev])?;
+        Ok(Some(out.trim().to_owned()).filter(|s| !s.is_empty()))
+    }
+
+    /// Commits reachable from `rev` that say they revert another commit
+    /// (`git revert`'s "This reverts commit <sha>"), as `(reverted sha,
+    /// committer time of the revert)`.
+    pub fn reverts(&self, rev: &str) -> Result<Vec<(String, i64)>, GitError> {
+        let out = self.run(&[
+            "log",
+            "--grep=This reverts commit",
+            "--format=%ct%x1f%B%x1e",
+            rev,
+        ])?;
+        let mut found = Vec::new();
+        for record in out.split('\x1e') {
+            let Some((time, body)) = record.trim_start().split_once('\x1f') else {
+                continue;
+            };
+            let Ok(time) = time.parse::<i64>() else {
+                continue;
+            };
+            let mut rest = body;
+            while let Some(at) = rest.find("This reverts commit ") {
+                rest = &rest[at + "This reverts commit ".len()..];
+                let sha: String = rest.chars().take_while(char::is_ascii_hexdigit).collect();
+                if sha.len() >= 7 {
+                    found.push((sha, time));
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Files renamed between two commits, as `(old path, new path)`.
+    pub fn renames(&self, old: &str, new: &str) -> Result<Vec<(String, String)>, GitError> {
+        let out = self.run(&[
+            "diff",
+            "--name-status",
+            "-z",
+            "-M",
+            "--diff-filter=R",
+            old,
+            new,
+        ])?;
+        let mut fields = out.split('\0');
+        let mut renames = Vec::new();
+        while let Some(status) = fields.next() {
+            if !status.starts_with('R') {
+                continue;
+            }
+            if let (Some(from), Some(to)) = (fields.next(), fields.next()) {
+                renames.push((from.to_owned(), to.to_owned()));
+            }
+        }
+        Ok(renames)
     }
 
     /// Raw `git diff -U0` between two trees, with paths relative to this
@@ -315,6 +421,40 @@ impl Git for GitCli {
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
             .filter(|s| !s.is_empty()))
+    }
+
+    fn changed_paths(
+        &self,
+        from: &str,
+        to: Option<&str>,
+        dir: &str,
+    ) -> Result<Option<Vec<String>>, GitError> {
+        let mut args = vec!["diff", "--name-only", "-z", "--no-renames", from];
+        args.extend(to);
+        args.extend(["--", dir]);
+        let mut paths: Vec<String> = self
+            .run(&args)?
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if to.is_none() {
+            let untracked = self.run(&[
+                "ls-files",
+                "-z",
+                "--others",
+                "--exclude-standard",
+                "--",
+                dir,
+            ])?;
+            paths.extend(
+                untracked
+                    .split('\0')
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        Ok(Some(paths))
     }
 
     fn commit_text(&self, sha: &str) -> Result<Option<String>, GitError> {

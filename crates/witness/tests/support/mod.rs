@@ -68,6 +68,11 @@ pub fn witness_env(dir: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str,
 
 /// Runs `git` in `dir` with a fixed identity and no user configuration.
 pub fn git(dir: &Path, args: &[&str]) -> String {
+    git_env(dir, args, &[])
+}
+
+/// [`git`] with extra environment variables.
+pub fn git_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
     let out = Command::new("git")
         .args([
             "-c",
@@ -82,6 +87,7 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
         .env("GIT_COMMITTER_NAME", "Test")
         .env("GIT_COMMITTER_EMAIL", "test@example.com")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .envs(env.iter().copied())
         .output()
         .unwrap();
     assert!(
@@ -147,6 +153,23 @@ impl TestRepo {
     pub fn commit_all(&self, message: &str) {
         self.git(&["add", "-A"]);
         self.git(&["commit", "-q", "-m", message]);
+    }
+
+    /// Runs git with the author and committer dates set to `time` (Unix
+    /// seconds).
+    pub fn git_at(&self, time: i64, args: &[&str]) -> String {
+        let date = format!("@{time} +0000");
+        git_env(
+            &self.path,
+            args,
+            &[("GIT_AUTHOR_DATE", &date), ("GIT_COMMITTER_DATE", &date)],
+        )
+    }
+
+    /// [`Self::commit_all`] at `time`.
+    pub fn commit_all_at(&self, time: i64, message: &str) {
+        self.git(&["add", "-A"]);
+        self.git_at(time, &["commit", "-q", "-m", message]);
     }
 
     pub fn witness(&self, args: &[&str], stdin: Option<&str>) -> Output {

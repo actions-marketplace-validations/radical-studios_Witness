@@ -194,6 +194,7 @@ fn render(report: &Report, detail: Detail) -> String {
     if detail.runs && !report.runs.is_empty() {
         runs_table(&mut out, &report.runs);
     }
+    track_record(&mut out, report);
 
     let _ = writeln!(out);
     let mut notes: Vec<String> = report
@@ -284,6 +285,30 @@ fn details(out: &mut String, summary: &str, sections: &[Section], max: usize) {
     let hidden = sections.len().saturating_sub(max);
     if hidden > 0 {
         let _ = writeln!(out, "- … and {hidden} more");
+    }
+    let _ = writeln!(out, "</details>");
+}
+
+/// The agents' track record in this report's areas, and how well flags
+/// predicted rewrites.
+fn track_record(out: &mut String, report: &Report) {
+    let t = &report.track_record;
+    if t.records.is_empty() && t.calibration.is_none() {
+        return;
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "<details>");
+    let _ = writeln!(out, "<summary>Track record</summary>");
+    let _ = writeln!(out);
+    if let Some(calibration) = &t.calibration {
+        let _ = writeln!(out, "{calibration}");
+        let _ = writeln!(out);
+    }
+    for record in &t.records {
+        let _ = writeln!(out, "- {}", record.describe());
+    }
+    if !t.records.is_empty() {
+        let _ = writeln!(out);
     }
     let _ = writeln!(out, "</details>");
 }

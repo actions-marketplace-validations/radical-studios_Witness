@@ -842,3 +842,123 @@ fn nudges_can_be_turned_off() {
     assert!(log.contains(r#""kind":"claim""#), "{log}");
     assert!(log.contains(r#""claim":"builds""#), "{log}");
 }
+
+/// The track record follows agent changes after they land: sections whose
+/// lines are still there survived, others were rewritten, and a revert
+/// counts as such. Reports and `witness stats` show it.
+#[test]
+fn track_record_from_landed_changes() {
+    const DAY: i64 = 24 * 60 * 60;
+    let t0: i64 = 1_700_000_000;
+    let repo = TestRepo::new();
+    repo.write("src/a.rs", "// a\n");
+    repo.write("src/b.rs", "// b\n");
+    repo.init_witness();
+    repo.commit_all_at(t0, "base");
+
+    // Change 1: a tested section and an unverified one.
+    repo.git(&["checkout", "-q", "-b", "one"]);
+    let agent = repo.claude("one");
+    agent.edit(
+        "src/a.rs",
+        "// a\n",
+        "// a\npub fn alpha() -> u32 {\n    41 + 1\n}\n",
+    );
+    agent.bash("cargo test");
+    agent.edit(
+        "src/b.rs",
+        "// b\n",
+        "// b\npub fn beta(x: u32) -> u32 {\n    x.saturating_mul(3)\n}\n",
+    );
+    repo.commit_all_at(t0 + 100, "one");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git_at(
+        t0 + 200,
+        &["merge", "-q", "--no-ff", "-m", "merge one", "one"],
+    );
+
+    // A human rewrites the unverified function a few days later.
+    repo.write(
+        "src/b.rs",
+        "// b\npub fn beta(x: u32) -> u32 {\n    x.checked_mul(3).unwrap_or(u32::MAX)\n}\n",
+    );
+    repo.commit_all_at(t0 + 5 * DAY, "fix beta");
+
+    // Change 2, reverted the next day.
+    repo.git(&["checkout", "-q", "-b", "two"]);
+    let agent = repo.claude("two");
+    agent.create(
+        "src/c.rs",
+        "pub fn gamma() -> &'static str {\n    \"gamma\"\n}\n",
+    );
+    agent.bash("cargo test");
+    repo.commit_all_at(t0 + 50 * DAY, "two");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git_at(
+        t0 + 50 * DAY,
+        &["merge", "-q", "--no-ff", "-m", "merge two", "two"],
+    );
+    let merge_two = repo.git(&["rev-parse", "HEAD"]);
+    repo.git_at(
+        t0 + 51 * DAY,
+        &["revert", "--no-edit", "-m", "1", merge_two.trim()],
+    );
+
+    // Change 3, too recent to judge.
+    repo.git(&["checkout", "-q", "-b", "three"]);
+    repo.claude("three")
+        .create("src/d.rs", "pub fn delta() -> i64 {\n    -4\n}\n");
+    repo.commit_all_at(t0 + 95 * DAY, "three");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git_at(
+        t0 + 95 * DAY,
+        &["merge", "-q", "--no-ff", "-m", "merge three", "three"],
+    );
+    repo.write("README", "tip\n");
+    repo.commit_all_at(t0 + 100 * DAY, "tip");
+
+    let out = repo.witness(&["stats", "--base", "main", "--json"], None);
+    let stats: serde_json::Value = serde_json::from_str(&support::stdout_of(&out)).unwrap();
+    assert_eq!(stats["changes"], 2, "{stats:#}");
+    assert_eq!(stats["pending_changes"], 1, "{stats:#}");
+    assert_eq!(
+        stats["overall"],
+        json!({"samples": 3, "rewritten": 1, "reverted": 1}),
+        "{stats:#}"
+    );
+    let by_status = stats["by_status"].as_array().unwrap();
+    let unverified = by_status
+        .iter()
+        .find(|s| s["status"] == "unverified")
+        .unwrap();
+    assert_eq!(unverified["rewritten"], 1, "{stats:#}");
+    let tested = by_status.iter().find(|s| s["status"] == "tested").unwrap();
+    assert_eq!(tested["samples"], 2, "{stats:#}");
+    assert_eq!(tested["reverted"], 1, "{stats:#}");
+    assert!(repo.abs(".witness/state/history.json").is_file());
+
+    let text = support::stdout_of(&repo.witness(&["stats", "--base", "main", "--cached"], None));
+    assert!(
+        text.contains("3 agent-written sections from 2 changes, judged 30 days after landing"),
+        "{text}"
+    );
+    assert!(
+        text.contains("1 more change is still within 30 days"),
+        "{text}"
+    );
+    assert!(text.contains("claude-code"), "{text}");
+
+    // A report on a new branch carries the track record.
+    repo.git(&["checkout", "-q", "-b", "four"]);
+    repo.claude("four")
+        .edit("src/a.rs", "    41 + 1\n", "    42\n");
+    repo.commit_all("four");
+    let report = repo.report_json("main", "HEAD");
+    assert_eq!(report["track_record"]["available"], true, "{report:#}");
+    assert_eq!(
+        report["track_record"]["message"],
+        "67% of 3 agent-written sections from 2 earlier changes rewritten or reverted within 30 days."
+    );
+    let markdown = repo.report_markdown("main", "HEAD");
+    assert!(markdown.contains("Track record: 67% of 3"), "{markdown}");
+}

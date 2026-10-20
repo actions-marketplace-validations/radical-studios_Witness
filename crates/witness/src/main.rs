@@ -5,6 +5,7 @@ mod ci;
 mod cli;
 mod exec;
 mod guidance;
+mod history;
 mod hook;
 mod hooks;
 mod init;
@@ -62,6 +63,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Status(args) => review::run_status(args),
         Command::Explain(args) => ok(review::run_explain(args)),
         Command::Sessions(args) => ok(review::run_sessions(args)),
+        Command::Stats(args) => ok(history::run_stats(args)),
         Command::Post(args) => review::run_post(args),
     }
 }

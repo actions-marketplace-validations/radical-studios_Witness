@@ -34,6 +34,9 @@ pub enum SignalKind {
     FilteredTestRun,
     /// A human changed lines next to this section in the same hunk.
     HumanModified,
+    /// This agent's earlier changes in this area were often rewritten or
+    /// reverted after they landed (see `witness stats`).
+    RewrittenOften,
 }
 
 impl SignalKind {
@@ -46,6 +49,7 @@ impl SignalKind {
             SignalKind::Thrash => "thrash",
             SignalKind::FilteredTestRun => "filtered-test-run",
             SignalKind::HumanModified => "human-modified",
+            SignalKind::RewrittenOften => "rewritten-often",
         }
     }
 }

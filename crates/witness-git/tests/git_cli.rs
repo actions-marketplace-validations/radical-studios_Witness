@@ -140,3 +140,50 @@ fn snapshots_the_working_tree_with_a_private_index() {
         .unwrap();
     assert!(status.stdout.is_empty());
 }
+
+#[test]
+fn walks_first_parent_history_reverts_and_renames() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    fs::write(dir.join("a.txt"), "a\n").unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-m", "base"]);
+    // A feature branch merged with a merge commit.
+    git(dir, &["checkout", "-q", "-b", "feature"]);
+    fs::create_dir_all(dir.join("logs")).unwrap();
+    fs::write(dir.join("logs/s.jsonl"), "{}\n").unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-m", "feature work"]);
+    git(dir, &["checkout", "-q", "main"]);
+    fs::write(dir.join("b.txt"), "b\n").unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-m", "unrelated"]);
+    git(
+        dir,
+        &["merge", "-q", "--no-ff", "-m", "merge feature", "feature"],
+    );
+    let cli = GitCli::new(dir);
+    let merge = cli.rev_parse("HEAD").unwrap();
+
+    let chain = cli.first_parent("HEAD", None, None).unwrap();
+    assert_eq!(chain.len(), 3, "the feature commit is not on the chain");
+    assert_eq!(chain[0].0, merge);
+    assert!(chain[0].1 > 1_000_000_000);
+    let landings = cli.first_parent("HEAD", Some("logs"), None).unwrap();
+    assert_eq!(landings.len(), 1);
+    assert_eq!(landings[0].0, merge);
+    assert_eq!(cli.first_parent("HEAD", None, Some(1)).unwrap().len(), 1);
+
+    git(dir, &["revert", "--no-edit", "-m", "1", "HEAD"]);
+    let reverts = cli.reverts("HEAD").unwrap();
+    assert_eq!(reverts.len(), 1);
+    assert_eq!(reverts[0].0, merge);
+
+    git(dir, &["mv", "a.txt", "c.txt"]);
+    git(dir, &["commit", "-q", "-m", "rename"]);
+    assert_eq!(
+        cli.renames(&merge, "HEAD").unwrap(),
+        vec![("a.txt".to_owned(), "c.txt".to_owned())]
+    );
+}

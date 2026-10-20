@@ -7,6 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::json;
 use witness_core::Report;
 use witness_core::classify::Status;
+use witness_core::history::History;
 use witness_core::record::{EventKind, timestamp};
 use witness_core::report::explain::explain;
 use witness_core::report::{self, LinkStyle, Links, TextOptions};
@@ -23,6 +24,7 @@ use crate::cli::{
     ColorArg, ExplainArgs, Format, OutputArgs, PlatformArg, PostArgs, ReportArgs, SessionsArgs,
     StatusArgs,
 };
+use crate::history;
 use crate::pipeline::{self, Repo, Request};
 use crate::workspace::{self, SESSIONS_DIR, STATE_DIR};
 
@@ -39,8 +41,9 @@ pub fn run_report(args: ReportArgs) -> Result<ExitCode> {
         worktree,
         diff: None,
     };
+    let history = track_record(&repo, &base);
     let mut report =
-        pipeline::compute(&repo.git, &req, &repo.config).map_err(shallow_hint(&repo))?;
+        pipeline::compute(&repo.git, &req, &repo.config, &history).map_err(shallow_hint(&repo))?;
     if let Some(links) = links_for(&repo.git, head) {
         report.set_links(&links);
     }
@@ -85,6 +88,7 @@ pub fn run_explain(args: ExplainArgs) -> Result<()> {
         &repo.git,
         &req,
         &repo.config,
+        &History::default(),
         gathered,
         |input, packages| {
             let analysis = report::analyze(input);
@@ -190,8 +194,9 @@ pub fn run_post(args: PostArgs) -> Result<ExitCode> {
         worktree,
         diff: None,
     };
+    let history = track_record(&repo, &base);
     let mut report =
-        pipeline::compute(&repo.git, &req, &repo.config).map_err(shallow_hint(&repo))?;
+        pipeline::compute(&repo.git, &req, &repo.config, &history).map_err(shallow_hint(&repo))?;
     if let Some(mut links) = links_for(&repo.git, head) {
         // GitHub builds pull requests on a temporary merge commit; link to
         // the change's own head instead.
@@ -293,6 +298,23 @@ fn append(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     writeln!(file, "{body}")
 }
 
+/// The track record for reports on `base`, updated from git history. A
+/// failure only costs the track record.
+fn track_record(repo: &Repo, base: &str) -> History {
+    match history::load(repo, base, true) {
+        Ok(built) => {
+            for note in built.notes {
+                eprintln!("witness: {note}");
+            }
+            built.history
+        }
+        Err(err) => {
+            eprintln!("witness: no track record: {err:#}");
+            History::default()
+        }
+    }
+}
+
 /// The report for the branch plus uncommitted work, and notes for the user.
 pub fn worktree_report(repo: &Repo, base: &str) -> Result<(Report, Vec<String>)> {
     let diff = worktree_diff(repo, base)?;
@@ -303,7 +325,11 @@ pub fn worktree_report(repo: &Repo, base: &str) -> Result<(Report, Vec<String>)>
         worktree: Some(&repo.root),
         diff: Some(&diff),
     };
-    let report = pipeline::compute(&repo.git, &req, &repo.config)?;
+    // The cached track record only: examining history is too slow here.
+    let history = history::load(repo, base, false)
+        .map(|built| built.history)
+        .unwrap_or_default();
+    let report = pipeline::compute(&repo.git, &req, &repo.config, &history)?;
     let mut notes = Vec::new();
     let sessions = format!("{}{SESSIONS_DIR}", repo.prefix);
     if let Ok(changed) = repo.git.status_porcelain(&sessions) {
@@ -397,7 +423,7 @@ impl FailOn {
                     "--fail-on: unknown status or signal {v:?}; statuses: failing, guessed, unrecorded, \
                      unverified, compiled, tested; signals: test-changed-after-failure, \
                      assertions-removed, high-risk-area, blind-edit, thrash, filtered-test-run, \
-                     human-modified"
+                     human-modified, rewritten-often"
                 );
             }
         }

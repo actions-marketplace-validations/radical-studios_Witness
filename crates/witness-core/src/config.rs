@@ -33,6 +33,7 @@ pub struct RawConfig {
     pub report: ReportConfig,
     pub capture: CaptureConfig,
     pub nudge: NudgeConfig,
+    pub history: HistoryConfig,
     pub commands: CommandPatterns,
     pub tests: TestsConfig,
     pub attribution: AttributionConfig,
@@ -117,6 +118,28 @@ impl Default for AttributionConfig {
                 rule("aider", r"(?im)^co-authored-by:\s*aider\b|\(aider\) <"),
                 rule("devin", r"(?i)devin-ai-integration"),
             ],
+        }
+    }
+}
+
+/// The agent track record, built from git history (`witness stats`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryConfig {
+    /// Build and show the track record in reports.
+    pub enabled: bool,
+    /// How long after landing a change's sections are judged.
+    pub horizon_days: u32,
+    /// How many of the latest landed changes to consider.
+    pub max_changes: usize,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            horizon_days: 30,
+            max_changes: 200,
         }
     }
 }
@@ -491,7 +514,7 @@ max_flagged = {max}
 close = [{close}]
 # Signals that put a section up for close review whatever its status:
 # test-changed-after-failure, assertions-removed, high-risk-area, blind-edit,
-# thrash, filtered-test-run, human-modified.
+# thrash, filtered-test-run, human-modified, rewritten-often.
 escalate = [{escalate}]
 
 # Globs for test files, for test-specific signals.
@@ -505,6 +528,16 @@ paths = [
 # prompt), "block" (ask the agent to keep going once per turn), or "off".
 [nudge]
 mode = "{nudge}"
+
+# The agent track record: what happened to agent-written sections after they
+# landed on the base branch. Built from git history and cached in
+# .witness/state/history.json; see `witness stats`.
+[history]
+enabled = {history}
+# Sections are judged this many days after landing.
+horizon_days = {horizon}
+# How many of the latest landed changes to look at.
+max_changes = {max_changes}
 
 [capture]
 # Snapshot the working tree around shell commands (and tools that report no
@@ -568,6 +601,9 @@ agent_commits = [
             .collect::<Vec<_>>()
             .join("\n"),
         nudge = "remind",
+        history = HistoryConfig::default().enabled,
+        horizon = HistoryConfig::default().horizon_days,
+        max_changes = HistoryConfig::default().max_changes,
         snapshots = CaptureConfig::default().snapshots,
         budget = CaptureConfig::default().snapshot_budget_ms,
         test = list(&patterns.test),

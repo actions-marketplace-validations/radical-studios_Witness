@@ -8,7 +8,7 @@ max_flagged = 10
 close = ["failing", "guessed", "unrecorded", "unverified"]
 # Signals that put a section up for close review whatever its status:
 # test-changed-after-failure, assertions-removed, high-risk-area, blind-edit,
-# thrash, filtered-test-run, human-modified.
+# thrash, filtered-test-run, human-modified, rewritten-often.
 escalate = ["test-changed-after-failure", "assertions-removed", "high-risk-area"]
 
 # Globs for test files, for test-specific signals.
@@ -34,6 +34,16 @@ paths = [
 # prompt), "block" (ask the agent to keep going once per turn), or "off".
 [nudge]
 mode = "remind"
+
+# The agent track record: what happened to agent-written sections after they
+# landed on the base branch. Built from git history and cached in
+# .witness/state/history.json; see `witness stats`.
+[history]
+enabled = true
+# Sections are judged this many days after landing.
+horizon_days = 30
+# How many of the latest landed changes to look at.
+max_changes = 200
 
 [capture]
 # Snapshot the working tree around shell commands (and tools that report no

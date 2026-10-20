@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use witness_core::history::NullHistoryStore;
+use witness_core::history::History;
 use witness_core::provenance::Segment;
 use witness_core::record::{Event, parse_log};
 use witness_core::report::{self, ReportInput};
@@ -111,6 +111,7 @@ pub fn with_input<T>(
     git: &dyn Git,
     req: &Request<'_>,
     config: &Config,
+    history: &History,
     gathered: Gathered,
     f: impl FnOnce(ReportInput<'_>, &dyn Packages) -> T,
 ) -> T {
@@ -145,7 +146,7 @@ pub fn with_input<T>(
         skipped_lines: gathered.skipped,
         config,
         classifier: &DefaultRules,
-        history: &NullHistoryStore,
+        history,
         packages: &packages,
         commit_agent: &commit_agent_fn,
     };
@@ -153,11 +154,21 @@ pub fn with_input<T>(
 }
 
 /// Builds the report for `req`.
-pub fn compute(git: &dyn Git, req: &Request<'_>, config: &Config) -> Result<Report> {
+pub fn compute(
+    git: &dyn Git,
+    req: &Request<'_>,
+    config: &Config,
+    history: &History,
+) -> Result<Report> {
     let gathered = gather(git, req)?;
-    Ok(with_input(git, req, config, gathered, |input, _| {
-        report::build(input)
-    }))
+    Ok(with_input(
+        git,
+        req,
+        config,
+        history,
+        gathered,
+        |input, _| report::build(input),
+    ))
 }
 
 /// What to report on.
@@ -294,9 +305,27 @@ impl CommitAgents<'_> {
 /// match this one's hunks.
 fn branch_logs(git: &dyn Git, req: &Request<'_>) -> Result<BTreeMap<String, String>> {
     let sessions_dir = format!("{}{SESSIONS_DIR}", req.prefix);
+    let merge_base = git.merge_base(req.base, req.head)?;
+    // Only logs that changed since the merge base can hold branch events;
+    // `None` means read them all.
+    let changed: Option<HashSet<String>> = match &merge_base {
+        Some(mb) => {
+            let to = if req.worktree.is_some() {
+                None
+            } else {
+                Some(req.head)
+            };
+            git.changed_paths(mb, to, &sessions_dir)?
+                .map(|paths| paths.into_iter().collect())
+        }
+        None => None,
+    };
+    let wanted =
+        |path: &str| path.ends_with(".jsonl") && changed.as_ref().is_none_or(|c| c.contains(path));
+
     let mut logs: BTreeMap<String, String> = BTreeMap::new();
     for path in git.list_files(req.head, &sessions_dir)? {
-        if path.ends_with(".jsonl")
+        if wanted(&path)
             && let Some(text) = git.show_file(req.head, &path)?
         {
             logs.insert(path, text);
@@ -307,16 +336,17 @@ fn branch_logs(git: &dyn Git, req: &Request<'_>) -> Result<BTreeMap<String, Stri
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if name.ends_with(".jsonl") {
+                let path = format!("{sessions_dir}/{name}");
+                if wanted(&path) {
                     let text = fs::read_to_string(entry.path())
                         .with_context(|| format!("reading {}", entry.path().display()))?;
-                    logs.insert(format!("{sessions_dir}/{name}"), text);
+                    logs.insert(path, text);
                 }
             }
         }
     }
 
-    let Some(merge_base) = git.merge_base(req.base, req.head)? else {
+    let Some(merge_base) = merge_base else {
         return Ok(logs);
     };
     for (path, text) in logs.iter_mut() {
@@ -444,7 +474,13 @@ diff --git a/.witness/sessions/s.jsonl b/.witness/sessions/s.jsonl\n--- /dev/nul
     #[test]
     fn computes_report_from_fake_git_and_skips_witness_files() {
         let git = FakeGit::new(DIFF, vec![(".witness/sessions/s.jsonl".into(), LOG.into())]);
-        let report = compute(&git, &request("main", None), &Config::default()).unwrap();
+        let report = compute(
+            &git,
+            &request("main", None),
+            &Config::default(),
+            &History::default(),
+        )
+        .unwrap();
         assert_eq!(report.summary.sections, 1);
         assert_eq!(report.summary.human, 0);
         assert_eq!(report.summary.skipped_lines, 1);
@@ -460,14 +496,26 @@ diff --git a/.witness/sessions/s.jsonl b/.witness/sessions/s.jsonl\n--- /dev/nul
         let extra = r#"{"schema_version":1,"session_id":"s","timestamp":"2026-10-20T00:00:03.000Z","agent":"claude-code","kind":"edit","file":"src/a.rs","lines":{"start":3,"end":3},"tool":"Edit"}"#;
         fs::write(dir.join("s.jsonl"), format!("{LOG}{extra}\n")).unwrap();
         let git = FakeGit::new(DIFF, vec![(".witness/sessions/s.jsonl".into(), LOG.into())]);
-        let report = compute(&git, &request("main", Some(tmp.path())), &Config::default()).unwrap();
+        let report = compute(
+            &git,
+            &request("main", Some(tmp.path())),
+            &Config::default(),
+            &History::default(),
+        )
+        .unwrap();
         assert_eq!(report.flagged[0].status, Status::Unverified);
     }
 
     #[test]
     fn unknown_ref_is_an_error() {
         let git = FakeGit::new("", Vec::new());
-        let err = compute(&git, &request("missing", None), &Config::default()).unwrap_err();
+        let err = compute(
+            &git,
+            &request("missing", None),
+            &Config::default(),
+            &History::default(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("unknown revision"));
     }
 
@@ -481,7 +529,13 @@ diff --git a/.witness/sessions/s.jsonl b/.witness/sessions/s.jsonl\n--- /dev/nul
             vec![(".witness/sessions/s.jsonl".into(), format!("{LOG}{read}\n"))],
         );
         git.base_files = vec![(".witness/sessions/s.jsonl".into(), LOG.into())];
-        let report = compute(&git, &request("main", None), &Config::default()).unwrap();
+        let report = compute(
+            &git,
+            &request("main", None),
+            &Config::default(),
+            &History::default(),
+        )
+        .unwrap();
         assert_eq!(report.summary.sections, 0);
         assert_eq!(report.summary.human, 1);
         assert_eq!(report.summary.sessions, 1);
@@ -502,7 +556,7 @@ diff --git a/.witness/sessions/s.jsonl b/.witness/sessions/s.jsonl\n--- /dev/nul
             prefix: "pkg/",
             ..request("main", None)
         };
-        let report = compute(&git, &req, &Config::default()).unwrap();
+        let report = compute(&git, &req, &Config::default(), &History::default()).unwrap();
         assert_eq!(report.summary.sections, 1);
         assert_eq!(report.summary.human, 0);
         assert_eq!(report.skim[0].file, "src/a.rs");
