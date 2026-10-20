@@ -148,7 +148,7 @@ compared with the session's previous snapshot.
 ```bash
 witness exec -- cargo test            # records the exact exit code
 witness exec -- cargo test | tail -20 # still exact: exec sees cargo's code
-witness exec "make test && make lint" # one argument runs through sh -c
+witness exec "make test && make lint" # one argument runs through sh -c (cmd /C on Windows)
 ```
 
 `witness exec` passes the command's output through unchanged, exits with

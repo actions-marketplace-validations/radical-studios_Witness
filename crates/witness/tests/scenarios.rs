@@ -209,10 +209,9 @@ fn exec_records_exact_exit_codes_and_changes() {
     assert_eq!(out.status.code(), Some(3));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
 
-    let out = repo.witness(
-        &["exec", "--session", "m1", "sh -c 'echo x > src/new.rs'"],
-        None,
-    );
+    // One argument runs through the shell (sh, or cmd on Windows); this
+    // script means the same in both.
+    let out = repo.witness(&["exec", "--session", "m1", "echo x > src/new.rs"], None);
     assert!(
         out.status.success(),
         "{}",
