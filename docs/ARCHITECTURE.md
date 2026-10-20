@@ -6,8 +6,8 @@ core, and platforms. Everything except posting works from plain git and files
 in the repository.
 
 ```
- Claude Code ──hooks──▶ witness hook <event> ─┐
- agent ─────────────▶ witness assume ...  ────┤ append
+ agent hooks ──▶ witness hook --agent <a> <event> ─┐  (adapters, snapshots)
+ agent / script ──▶ witness assume|record|exec ────┤ append
                                                ▼
                            .witness/sessions/<id>.jsonl  (committed)
                                                │
@@ -25,50 +25,58 @@ in the repository.
 | Crate               | Role | I/O |
 | ------------------- | ---- | --- |
 | `witness-core`      | Data model, record format, hook payload parsing, command classification and redaction, config parsing, event→hunk matching, hunk classification, report rendering, track-record types. | None. Callers pass in strings, file contents and a clock. |
-| `witness-git`       | `Git` trait over the `git` CLI (`diff`, `rev-parse`, `ls-tree`, `show`, `log`, `blame`) and a unified-diff parser that turns `git diff -U0` into `Hunk`s. | Spawns `git`. No libgit2. |
+| `witness-git`       | `Git` trait over the `git` CLI (`diff`, `rev-parse`, `merge-base`, `ls-tree`, `show`, `log`, `blame`), working-tree snapshots through a private index, and a unified-diff parser that turns `git diff -U0` into `Hunk`s. | Spawns `git`. No libgit2. |
 | `witness-platform`  | `Platform` trait. `DryRun` writes to any `io::Write`. `github` and `gitlab` return `NotImplemented`. | Dry run writes to the given writer only. No network in v0. |
-| `witness`           | CLI (clap derive): `init`, `hook`, `assume`, `report`, `post`. Owns all filesystem access and wires the crates together. | Filesystem, stdin/stdout, `git` via `witness-git`. |
+| `witness`           | CLI (clap derive): `init`, `hooks`, `hook`, `assume`, `exec`, `record`, `report`, `post`. Owns all filesystem access, snapshots, and wires the crates together. | Filesystem, stdin/stdout, child processes, `git` via `witness-git`. |
 
 Dependency direction: `witness` → `witness-platform`, `witness-git` →
 `witness-core`. Core depends on nothing in the workspace.
 
 ## Capture
 
-The Claude Code plugin (`plugin/claude-code/`) registers command hooks:
+Each agent's hooks run `witness hook --agent <agent> <event>` (see
+[AGENTS.md](AGENTS.md) for what `witness hooks install` writes per agent).
+The pipeline is the same for every agent:
 
-| Claude Code event     | Matcher                              | Call |
-| --------------------- | ------------------------------------ | ---- |
-| `PostToolUse`         | `Edit\|Write\|MultiEdit\|NotebookEdit\|Read\|Bash` | `witness hook post-tool-use` |
-| `PostToolUseFailure`  | `Bash`                               | `witness hook post-tool-use-failure` |
-| `SessionEnd`          | (all)                                | `witness hook session-end` |
-
-`PostToolUse` only fires for tool calls that succeeded, so a `Bash` event
-there means exit 0. Failed commands arrive as `PostToolUseFailure`, whose
-`error` starts with `Exit code N`. That is why both are hooked.
-
-`witness hook`:
-
-1. reads the JSON payload from stdin (never waits on a terminal);
-2. finds the repo root by walking up from the payload's `cwd` to a directory
-   containing `.witness/`; if none, exits 0 without writing;
-3. converts the payload to zero or more records (pure, in core; the CLI passes
-   a closure that reads a file when a line range has to be located);
-4. appends them to `.witness/sessions/<session>.jsonl` and updates
+1. **Adapter** (`witness-core/src/capture/<agent>.rs`, pure): the JSON
+   payload becomes a `HookInput`: agent, session, turn, subagent, model, and
+   an event (`Tool(ToolCall)`, `SessionEnd`, `Stop`, ...). A `ToolCall` has a
+   phase (pre, post, post-failure) and an action: `Shell` (command, exit
+   status, output held in memory), `Edit` (files, with any patch,
+   replacements or content), `Read`, `NoWrite` or `Unknown`. Without
+   `--agent`, the agent is guessed from the payload's shape.
+2. **Repo root**: the nearest ancestor of the payload's `cwd` containing
+   `.witness/`; if none, the hook exits 0 without writing.
+3. **Capture plan** (`capture_plan`, pure): how to observe the call's file
+   changes. Nothing for tools that can't write, for read-only or background
+   shell commands, for git commands that move the working tree, and for
+   edits the agent reports a patch of; file pre-images for edit tools
+   without a reliable patch; working-tree snapshots for other shell commands
+   and unknown tools.
+4. **Snapshots** (`witness/src/snapshot.rs`): the pre-tool hook saves a tree
+   id (`git add -A` into a private index, then `git write-tree`) or copies
+   the target files; the post-tool hook does the same and diffs (`git
+   diff-tree -U0`, or an in-process line diff). Agents with only
+   post-tool hooks are compared with the session's previous snapshot. A
+   snapshot over the time budget turns snapshots off for the session.
+5. **Records** (`events_for`, pure): commands are classified and redacted;
+   edits come from the observed diff or, failing that, the agent's patch,
+   the new file's content, or the new text located in the file.
+6. **Append** to `.witness/sessions/<session>.jsonl` and update
    `.witness/state/current-session`.
 
-It always exits 0. Internal errors (including panics and argument errors) are
-logged to stderr, which Claude Code doesn't show to the model on exit 0, and,
+It always exits 0, because some agents (Copilot) deny a tool call whose
+pre-tool hook fails. Internal errors (including panics and argument errors)
+are logged to stderr, which agents don't show the model on exit 0, and,
 once the repo is known, to the local `.witness/state/hook.log` (bounded to
 64 KiB). With `WITNESS_DEBUG=1`, every hook call also logs its duration
-there. Exit
-code 2 would block the agent's tool call, so it is never used. There is no
-network and no `git` call on this path; the cost is one process start, a
-TOML parse and a file append.
+there. There is no network access; git runs only for snapshots.
 
-`witness assume --file <path> [--lines a-b] "<text>"` is run by the agent
-itself (taught by the plugin's skill). It finds the session from
-`--session`, `$WITNESS_SESSION_ID`, or `.witness/state/current-session`, in
-that order, and appends an `assumption` record.
+`witness assume`, `witness record` and `witness exec` write records
+directly. They use the session from `--session`, `$WITNESS_SESSION_ID`, or
+`.witness/state/current-session`, in that order. The pre-tool hook updates
+that file just before each shell command runs, so a `witness assume` run by
+the agent lands in the right session even when several are active.
 
 See [RECORD_FORMAT.md](RECORD_FORMAT.md) for the records.
 

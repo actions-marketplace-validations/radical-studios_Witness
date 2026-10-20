@@ -1,0 +1,15 @@
+{
+  "hook_event_name": "PostToolUse",
+  "session_id": "c0p1l07-5e55-4a1b-9c2d-0e1f2a3b4c5d",
+  "timestamp": "2026-10-20T03:37:00.000Z",
+  "cwd": "/home/user/my-project",
+  "tool_name": "create",
+  "tool_input": {
+    "path": "/home/user/my-project/src/greeting.rs",
+    "file_text": "pub fn hi() -> &'static str {\n    \"hi\"\n}\n"
+  },
+  "tool_result": {
+    "result_type": "success",
+    "text_result_for_llm": "Created file /home/user/my-project/src/greeting.rs"
+  }
+}

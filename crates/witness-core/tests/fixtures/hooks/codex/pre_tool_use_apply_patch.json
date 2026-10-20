@@ -1,0 +1,14 @@
+{
+  "session_id": "019a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8",
+  "turn_id": "turn-3",
+  "transcript_path": null,
+  "cwd": "/home/user/my-project",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5-codex",
+  "permission_mode": "workspace-write",
+  "tool_name": "apply_patch",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-    1\n+    1 + 1\n*** Add File: src/new.rs\n+pub fn new() {}\n*** End Patch\n"
+  },
+  "tool_use_id": "call_9Kx1"
+}

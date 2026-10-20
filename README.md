@@ -33,6 +33,17 @@ For a local checkout, `claude --plugin-dir ./plugin/claude-code` loads it
 for one session. The hooks call `witness` from your `PATH` and do nothing in
 repositories that haven't run `witness init`.
 
+Other agents get their hooks from `witness hooks install`, which writes the
+agent's own config file in the repository:
+
+```bash
+witness hooks install codex copilot   # also: claude-code, cursor, gemini-cli, --all
+```
+
+Agents without hooks can run commands through `witness exec -- cargo test`
+and report edits with `witness record`. See [docs/AGENTS.md](docs/AGENTS.md)
+for what each agent supports.
+
 ## Quickstart
 
 ```bash

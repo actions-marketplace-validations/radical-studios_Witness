@@ -220,6 +220,34 @@ impl ClaudeSession<'_> {
         self.hook("post-tool-use", &json);
     }
 
+    /// A Bash command that changes files: `PreToolUse`, then `effect` (what
+    /// the command did), then `PostToolUse` with exit 0.
+    pub fn bash_with(&self, command: &str, effect: impl FnOnce(&TestRepo)) {
+        let id = format!("toolu_{}", command.len());
+        let pre = json!({
+            "session_id": self.id,
+            "cwd": self.cwd.to_str().unwrap(),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_use_id": id,
+        })
+        .to_string();
+        self.hook("pre-tool-use", &pre);
+        effect(self.repo);
+        let post = json!({
+            "session_id": self.id,
+            "cwd": self.cwd.to_str().unwrap(),
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": {"stdout": "", "stderr": "", "interrupted": false},
+            "tool_use_id": id,
+        })
+        .to_string();
+        self.hook("post-tool-use", &post);
+    }
+
     /// A Bash command that exited 0.
     pub fn bash(&self, command: &str) {
         let json = self.payload(
@@ -267,4 +295,18 @@ impl ClaudeSession<'_> {
         .to_string();
         self.hook("session-end", &json);
     }
+}
+
+/// Sends a hook payload as `witness hook <args...>` and checks it was
+/// silent and clean.
+pub fn send_hook(repo: &TestRepo, args: &[&str], payload: &Value) {
+    let mut full = vec!["hook"];
+    full.extend_from_slice(args);
+    let out = repo.witness(&full, Some(&payload.to_string()));
+    assert!(out.status.success());
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

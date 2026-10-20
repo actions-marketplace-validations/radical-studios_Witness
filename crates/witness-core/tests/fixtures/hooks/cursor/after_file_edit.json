@@ -1,0 +1,10 @@
+{
+  "conversation_id": "cur-2f9a",
+  "generation_id": "gen-71c3",
+  "hook_event_name": "afterFileEdit",
+  "workspace_roots": ["/home/user/my-project"],
+  "file_path": "/home/user/my-project/src/lib.rs",
+  "edits": [
+    {"old_string": "    1\n", "new_string": "    1 + 1\n"}
+  ]
+}

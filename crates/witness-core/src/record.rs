@@ -23,6 +23,15 @@ pub struct Event {
     #[serde(with = "timestamp")]
     pub timestamp: OffsetDateTime,
     pub agent: String,
+    /// The agent's id for the turn (user prompt) this happened in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
+    /// Subagent type (or id) when a subagent did this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<String>,
+    /// Model name, when the agent reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(flatten)]
     pub kind: EventKind,
 }
@@ -38,6 +47,9 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         change: Option<Change>,
         tool: String,
+        /// How the change was observed; absent in older logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<EditVia>,
     },
     Read {
         file: String,
@@ -56,6 +68,31 @@ pub enum EventKind {
     SessionEnd {
         reason: String,
     },
+    /// Something about capture itself, e.g. that file snapshots were turned
+    /// off for being too slow. Informational.
+    Note {
+        text: String,
+    },
+}
+
+/// Where an edit's line range came from, most precise first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditVia {
+    /// The agent's own patch of the edit.
+    Patch,
+    /// The file before the tool ran, diffed with the file after it.
+    Preimage,
+    /// Working-tree snapshots before and after a shell or unknown tool.
+    Snapshot,
+    /// The full content of a newly created file.
+    Content,
+    /// The new text, located in the file after the edit.
+    Locate,
+    /// Stated by the agent or a wrapper script (`witness record edit`).
+    Reported,
+    /// Not known; the edit covers the whole file.
+    Unknown,
 }
 
 /// Inclusive, 1-based line range.
@@ -142,7 +179,22 @@ impl Event {
             session_id: session_id.to_owned(),
             timestamp,
             agent: agent.to_owned(),
+            turn: None,
+            subagent: None,
+            model: None,
             kind,
+        }
+    }
+
+    /// The file this event is about, if any.
+    pub fn file(&self) -> Option<&str> {
+        match &self.kind {
+            EventKind::Edit { file, .. }
+            | EventKind::Read { file }
+            | EventKind::Assumption { file, .. } => Some(file),
+            EventKind::Command { .. } | EventKind::SessionEnd { .. } | EventKind::Note { .. } => {
+                None
+            }
         }
     }
 
@@ -256,6 +308,7 @@ mod tests {
                     added: 7,
                 }),
                 tool: "Edit".into(),
+                via: None,
             },
         );
         let line = event.to_line().unwrap();
@@ -265,6 +318,29 @@ mod tests {
         );
         let parsed = parse_log(&line);
         assert_eq!(parsed.events, vec![event]);
+    }
+
+    #[test]
+    fn optional_context_fields_round_trip() {
+        let mut event = Event::new(
+            "s1",
+            "codex",
+            ts(),
+            EventKind::Edit {
+                file: "a.rs".into(),
+                lines: Some(LineRange::new(1, 2)),
+                change: None,
+                tool: "apply_patch".into(),
+                via: Some(EditVia::Preimage),
+            },
+        );
+        event.turn = Some("t1".into());
+        event.subagent = Some("explore".into());
+        event.model = Some("gpt-x".into());
+        let line = event.to_line().unwrap();
+        assert!(line.contains(r#""turn":"t1","subagent":"explore","model":"gpt-x","kind":"edit""#));
+        assert!(line.contains(r#""via":"preimage""#));
+        assert_eq!(parse_log(&line).events, vec![event]);
     }
 
     #[test]

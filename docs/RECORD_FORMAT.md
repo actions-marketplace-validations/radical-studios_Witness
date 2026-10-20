@@ -14,8 +14,12 @@ Status: **schema_version 1**. This document is the contract between capture
     ├── sessions/
     │   └── <session-id>.jsonl   # committed with the code
     └── state/                   # local only, never committed
-        ├── current-session      # id of the most recent session, for `witness assume`
-        └── hook.log             # hook errors (and timings with WITNESS_DEBUG=1)
+        ├── current-session      # most recent session and agent, for `witness assume`
+        ├── hook.log             # hook errors (and timings with WITNESS_DEBUG=1)
+        ├── index                # private git index for working-tree snapshots
+        ├── pre/                 # snapshot ids and file copies between pre- and post-tool hooks
+        ├── last/                # each session's latest snapshot (agents without pre-tool hooks)
+        └── snapshots-off        # session whose snapshots exceeded the time budget
 ```
 
 `<session-id>` is the agent's session id with every character other than
@@ -43,7 +47,10 @@ line never breaks a report.
 | `schema_version` | integer | `1`. Readers ignore lines with a higher major version. |
 | `session_id`     | string  | Agent session id, unmodified. |
 | `timestamp`      | string  | RFC 3339, UTC, e.g. `2026-10-20T03:37:00.123Z`. |
-| `agent`          | string  | `claude-code` for this pass. |
+| `agent`          | string  | `claude-code`, `codex`, `copilot`, `cursor`, `gemini-cli`, or a name given to `witness record`/`exec`/the generic hook format. |
+| `turn`           | string, optional | The agent's id for the turn (user prompt): Claude Code's `prompt_id`, Codex's `turn_id`, Cursor's `generation_id`. |
+| `subagent`       | string, optional | Subagent type (or id) when a subagent made the call. |
+| `model`          | string, optional | Model name, when the agent reports it. |
 | `kind`           | string  | One of the kinds below. |
 
 Ordering: events are ordered by `timestamp`, then by `session_id`, then by
@@ -65,16 +72,26 @@ The agent changed a file.
 | `file`   | string          | Path relative to the repo root, `/`-separated. |
 | `lines`  | range or `null` | `null` means the whole file (range unknown). |
 | `change` | object or absent| `{"start": s, "removed": r, "added": n}`: the edit replaced `r` lines starting at line `s` with `n` lines. Used to shift earlier ranges in the same file when later edits move lines. |
-| `tool`   | string          | Tool name, e.g. `Edit`, `Write`, `MultiEdit`, `NotebookEdit`. |
+| `tool`   | string          | The agent's tool name, e.g. `Edit`, `apply_patch`, `create`, or the shell tool (`Bash`, `bash`, ...) for files a command changed. |
+| `via`    | string, optional| How the range was observed: `patch`, `preimage`, `snapshot`, `content`, `locate`, `reported` or `unknown`. Absent in older logs. |
 
-One tool call may produce several `edit` lines (e.g. `replace_all`, `MultiEdit`).
+One tool call may produce several `edit` lines (e.g. `replace_all`,
+`MultiEdit`, or a command that changed several places). Within a call they
+are in ascending line order, in the file's final coordinates.
 
 How capture derives the range, most precise first:
 
-1. `tool_response.structuredPatch` from Claude Code, with context lines trimmed;
-2. locating `tool_input.new_string` in the file after the edit;
-3. for `Write` of a new file, `1..=line count` of `tool_input.content`;
-4. otherwise `null` (whole file).
+1. `patch`: the agent's own patch (Claude Code's `structuredPatch`), with
+   context lines trimmed;
+2. `preimage`: the file copied by the pre-tool hook, diffed with the file
+   after the tool (Codex `apply_patch`, Copilot `edit`/`create`, Gemini
+   `replace`/`write_file`);
+3. `snapshot`: working-tree snapshots before and after a shell command or
+   unknown tool, diffed (`sed -i`, formatters, code generators);
+4. `content`: for a newly created file, `1..=line count` of its content;
+5. `locate`: the new text located in the file after the edit;
+6. `reported`: stated with `witness record edit --lines`;
+7. otherwise `null` (whole file, `via: "unknown"`).
 
 ### `read`
 
@@ -90,8 +107,15 @@ How capture derives the range, most precise first:
 | `exit_code`      | integer or `null`| `null` when the exit status can't be attributed to the classified command: background commands, interrupted commands, or when the classified part is followed by `\|\|`, `;`, `&`, or by `\|` without an earlier `set -o pipefail` (as in `cargo test \| tail`). |
 | `command`        | string           | Command text with secrets redacted, then truncated to 200 characters. |
 
-Exit status comes from the hook event: `PostToolUse` for `Bash` means exit 0;
-`PostToolUseFailure` carries `Exit code N` on the first line of `error`.
+Exit status comes from the agent:
+
+- Claude Code: `PostToolUse` for `Bash` means exit 0; `PostToolUseFailure`
+  carries `Exit code N` on the first line of `error`.
+- Codex: the output text starts with `Exit code: N` (or says `Process
+  exited with code N`).
+- Copilot: the output's `<exited with exit code N>` marker, else unknown.
+- Gemini CLI: `Exit Code: N` in the output, else unknown.
+- `witness exec`: the process's own exit status.
 
 ### `assumption`
 
@@ -103,19 +127,32 @@ Recorded by `witness assume`.
 | `lines` | range or absent  | Absent means the whole file. |
 | `text`  | string           | What the agent relied on without verifying, truncated to 500 characters, secrets redacted. |
 
+### `note`
+
+Something about capture itself, e.g. that working-tree snapshots were turned
+off for a session because they were too slow. Informational; reports ignore
+it.
+
+| Field  | Type   | Notes |
+| ------ | ------ | ----- |
+| `text` | string | One sentence. |
+
 ### `session_end`
 
 Written by the `SessionEnd` hook. Marks the log as complete.
 
 | Field    | Type   | Notes |
 | -------- | ------ | ----- |
-| `reason` | string | Claude Code's `reason` (`clear`, `resume`, `logout`, `prompt_input_exit`, `other`). |
+| `reason` | string | The agent's reason, e.g. Claude Code's `clear`, `resume`, `logout`, `prompt_input_exit`, `other`. |
 
 ## What is never stored
 
 - Tool output (`tool_response` contents, stdout, stderr, error text).
 - File contents, including `old_string`, `new_string` and `content`. Capture
-  reads them in memory to compute line ranges and drops them.
+  reads them in memory to compute line ranges and drops them. Pre-tool file
+  copies live only under `.witness/state/pre/` (ignored by git) and are
+  deleted by the post-tool hook; snapshots are git objects in your local
+  object store, never pushed.
 - Environment variables.
 - Secrets in command or assumption text. Redaction replaces with
   `[REDACTED]`: `KEY=value` / `--token value` style pairs whose key names a

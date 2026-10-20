@@ -1,0 +1,11 @@
+{
+  "session_id": "019a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8",
+  "turn_id": "turn-3",
+  "transcript_path": null,
+  "cwd": "/home/user/my-project",
+  "hook_event_name": "Stop",
+  "model": "gpt-5-codex",
+  "permission_mode": "workspace-write",
+  "stop_hook_active": false,
+  "last_assistant_message": "Done. All tests pass."
+}

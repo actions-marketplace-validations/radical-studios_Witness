@@ -16,12 +16,7 @@ pub struct Placed {
 
 impl Placed {
     pub fn file(&self) -> Option<&str> {
-        match &self.event.kind {
-            EventKind::Edit { file, .. }
-            | EventKind::Read { file }
-            | EventKind::Assumption { file, .. } => Some(file),
-            EventKind::Command { .. } | EventKind::SessionEnd { .. } => None,
-        }
+        self.event.file()
     }
 }
 
@@ -205,6 +200,7 @@ mod tests {
             lines: Some(change.new_range()),
             change: Some(change),
             tool: "Edit".into(),
+            via: None,
         }
     }
 

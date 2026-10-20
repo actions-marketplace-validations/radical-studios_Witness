@@ -29,8 +29,30 @@ pub enum ConfigError {
 #[serde(default, deny_unknown_fields)]
 pub struct RawConfig {
     pub report: ReportConfig,
+    pub capture: CaptureConfig,
     pub commands: CommandPatterns,
     pub areas: Vec<AreaConfig>,
+}
+
+/// How hooks observe file changes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CaptureConfig {
+    /// Snapshot the working tree around shell commands and tools without
+    /// patch information, so their file changes are recorded.
+    pub snapshots: bool,
+    /// A snapshot slower than this turns snapshots off for the rest of the
+    /// session (recorded as a note).
+    pub snapshot_budget_ms: u64,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            snapshots: true,
+            snapshot_budget_ms: 500,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,6 +128,20 @@ pub struct Config {
     build: Vec<Regex>,
     lint: Vec<Regex>,
     areas: Vec<(String, GlobSet)>,
+}
+
+/// The configuration file, at the repo root.
+pub const CONFIG_FILE: &str = "witness.toml";
+/// Witness's own directory, at the repo root.
+pub const WITNESS_DIR: &str = ".witness";
+
+/// Whether a repo-relative path is Witness's own (its config or records),
+/// which is never reported as a change.
+pub fn is_witness_path(path: &str) -> bool {
+    path == CONFIG_FILE
+        || path
+            .strip_prefix(WITNESS_DIR)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Name of the area a path falls in when no `[[areas]]` entry matches.
@@ -217,6 +253,14 @@ pub fn default_toml() -> String {
 # Cap on how many sections the report flags for close review.
 max_flagged = {max}
 
+[capture]
+# Snapshot the working tree around shell commands (and tools that report no
+# patch) so files they change are recorded. Snapshots use a private git index
+# under .witness/state/ and skip read-only commands.
+snapshots = {snapshots}
+# A snapshot slower than this (ms) turns snapshots off for the session.
+snapshot_budget_ms = {budget}
+
 # Regexes matched against each simple command the agent runs, after leading
 # VAR=value assignments and wrappers (timeout, time, env, nice) are removed.
 # A passing `test` or `build` run after an edit marks that edit as checked.
@@ -238,6 +282,8 @@ lint = [
 # paths = ["src/core/**"]
 "#,
         max = ReportConfig::default().max_flagged,
+        snapshots = CaptureConfig::default().snapshots,
+        budget = CaptureConfig::default().snapshot_budget_ms,
         test = list(&patterns.test),
         build = list(&patterns.build),
         lint = list(&patterns.lint),

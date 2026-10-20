@@ -194,6 +194,7 @@ mod tests {
             new_start,
             new_count,
             added: Vec::new(),
+            removed: Vec::new(),
             binary: false,
         }
     }
@@ -225,6 +226,7 @@ mod tests {
                 lines: Some(change.new_range()),
                 change: Some(change),
                 tool: "Edit".into(),
+                via: None,
             })
         }
         fn whole_file_edit(self, file: &str) -> Self {
@@ -233,6 +235,7 @@ mod tests {
                 lines: None,
                 change: None,
                 tool: "NotebookEdit".into(),
+                via: None,
             })
         }
         fn run(self, class: CommandClass, cmd: &str, exit: Option<i32>) -> Self {
@@ -408,6 +411,7 @@ mod tests {
                 lines: Some(change.new_range()),
                 change: Some(change),
                 tool: "Edit".into(),
+                via: None,
             })
             .verdict(&hunk("a.rs", 7, 0));
         assert_eq!(v.status, Status::Unverified);

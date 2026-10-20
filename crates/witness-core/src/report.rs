@@ -339,6 +339,7 @@ mod tests {
             new_start,
             new_count,
             added: vec!["x".into()],
+            removed: Vec::new(),
             binary: false,
         }
     }
@@ -363,6 +364,7 @@ mod tests {
             lines: Some(change.new_range()),
             change: Some(change),
             tool: "Edit".into(),
+            via: None,
         }
     }
 

@@ -87,17 +87,33 @@ impl GitCli {
     }
 
     fn output(&self, args: &[&str]) -> Result<std::process::Output, GitError> {
-        Ok(Command::new("git")
-            .args(["-c", "core.quotePath=false", "-c", "color.ui=never"])
+        self.output_with_index(args, None)
+    }
+
+    fn output_with_index(
+        &self,
+        args: &[&str],
+        index: Option<&Path>,
+    ) -> Result<std::process::Output, GitError> {
+        let mut cmd = Command::new("git");
+        cmd.args(["-c", "core.quotePath=false", "-c", "color.ui=never"])
             .args(args)
             .current_dir(&self.dir)
             .env("GIT_TERMINAL_PROMPT", "0")
-            .env("LC_ALL", "C")
-            .output()?)
+            .env("LC_ALL", "C");
+        match index {
+            Some(index) => cmd.env("GIT_INDEX_FILE", index),
+            None => cmd.env_remove("GIT_INDEX_FILE"),
+        };
+        Ok(cmd.output()?)
     }
 
     fn run(&self, args: &[&str]) -> Result<String, GitError> {
-        let out = self.output(args)?;
+        self.run_with_index(args, None)
+    }
+
+    fn run_with_index(&self, args: &[&str], index: Option<&Path>) -> Result<String, GitError> {
+        let out = self.output_with_index(args, index)?;
         if !out.status.success() {
             return Err(GitError::Failed {
                 args: args.join(" "),
@@ -106,6 +122,61 @@ impl GitCli {
             });
         }
         Ok(String::from_utf8(out.stdout)?)
+    }
+
+    /// Path of a file in the git directory, e.g. `index`.
+    pub fn git_path(&self, name: &str) -> Result<PathBuf, GitError> {
+        let path = PathBuf::from(self.run(&["rev-parse", "--git-path", name])?.trim());
+        Ok(if path.is_absolute() {
+            path
+        } else {
+            self.dir.join(path)
+        })
+    }
+
+    /// Records the working tree under this directory in a tree object,
+    /// using the private index file `index` so the real index is left
+    /// alone, and returns the tree's id. Ignored files are left out. A
+    /// concurrent snapshot holding the index lock is waited for briefly.
+    pub fn snapshot_tree(&self, index: &Path) -> Result<String, GitError> {
+        let mut attempt = 0;
+        loop {
+            match self.run_with_index(&["add", "-A", "--ignore-errors", "--", "."], Some(index)) {
+                Err(GitError::Failed { stderr, .. })
+                    if stderr.contains("index.lock") && attempt < 40 =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                other => {
+                    other?;
+                    break;
+                }
+            }
+        }
+        Ok(self
+            .run_with_index(&["write-tree"], Some(index))?
+            .trim()
+            .to_owned())
+    }
+
+    /// Raw `git diff -U0` between two trees, with paths relative to this
+    /// directory and changes outside it left out.
+    pub fn diff_trees(&self, old: &str, new: &str) -> Result<String, GitError> {
+        self.run(&[
+            "diff-tree",
+            "-r",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "-U0",
+            "-M",
+            "--relative",
+            old,
+            new,
+        ])
     }
 }
 

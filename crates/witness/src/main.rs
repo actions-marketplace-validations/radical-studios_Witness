@@ -2,9 +2,13 @@
 
 mod assume;
 mod cli;
+mod exec;
 mod hook;
+mod hooks;
 mod init;
 mod pipeline;
+mod record;
+mod snapshot;
 mod workspace;
 
 use std::process::ExitCode;
@@ -22,6 +26,13 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let cli = Cli::parse();
+    // `witness exec` exits with the command's own code.
+    if let Command::Exec(args) = cli.command {
+        return exec::run(args).unwrap_or_else(|err| {
+            eprintln!("witness exec: {err:#}");
+            ExitCode::FAILURE
+        });
+    }
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -34,12 +45,21 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init(args) => init::run(args),
-        Command::Hook { event } => {
-            hook::run(&event);
+        Command::Hook { agent, event } => {
+            hook::run(agent.as_deref(), &event);
             Ok(())
         }
         Command::Assume(args) => assume::run(args),
+        Command::Exec(_) => unreachable_exec(),
+        Command::Record(args) => record::run(args),
+        Command::Hooks(args) => hooks::run(args),
         Command::Report(args) => pipeline::run_report(args),
         Command::Post(args) => pipeline::run_post(args),
     }
+}
+
+/// `witness exec` is dispatched before [`run`], so it can return the
+/// command's exit code.
+fn unreachable_exec() -> Result<()> {
+    anyhow::bail!("internal error: exec reached the generic dispatcher")
 }

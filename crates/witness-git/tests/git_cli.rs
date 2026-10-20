@@ -89,3 +89,54 @@ fn unrelated_histories_have_no_merge_base() {
     git(dir, &["commit", "-q", "-m", "b"]);
     assert_eq!(GitCli::new(dir).merge_base("main", "other").unwrap(), None);
 }
+
+#[test]
+fn snapshots_the_working_tree_with_a_private_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    fs::create_dir_all(dir.join("pkg")).unwrap();
+    fs::write(dir.join("pkg/a.txt"), "one\ntwo\n").unwrap();
+    fs::write(dir.join("top.txt"), "top\n").unwrap();
+    fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-m", "first"]);
+
+    let pkg = GitCli::new(dir.join("pkg"));
+    let index = dir.join("snap.index");
+    fs::copy(pkg.git_path("index").unwrap(), &index).unwrap();
+    let before = pkg.snapshot_tree(&index).unwrap();
+    fs::write(dir.join("pkg/a.txt"), "one\nTWO\n").unwrap();
+    fs::write(dir.join("pkg/new.txt"), "n\n").unwrap();
+    fs::write(dir.join("pkg/debug.log"), "ignored\n").unwrap();
+    fs::write(dir.join("top.txt"), "changed outside pkg\n").unwrap();
+    let after = pkg.snapshot_tree(&index).unwrap();
+    assert_ne!(before, after);
+
+    let hunks = witness_git::parse_unified_diff(&pkg.diff_trees(&before, &after).unwrap()).unwrap();
+    let summary: Vec<_> = hunks
+        .iter()
+        .map(|h| {
+            (
+                h.file.as_str(),
+                h.new_start,
+                h.added.clone(),
+                h.removed.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("a.txt", 2, vec!["TWO".to_owned()], vec!["two".to_owned()]),
+            ("new.txt", 1, vec!["n".to_owned()], vec![]),
+        ]
+    );
+    // The real index is untouched.
+    let status = Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(status.stdout.is_empty());
+}

@@ -1,0 +1,11 @@
+{
+  "sessionId": "c0p1l07-5e55-4a1b-9c2d-0e1f2a3b4c5d",
+  "timestamp": 1792468620000,
+  "cwd": "/home/user/my-project",
+  "toolName": "bash",
+  "toolArgs": "{\"command\":\"npm test\",\"description\":\"Run the test suite\"}",
+  "toolResult": {
+    "resultType": "success",
+    "textResultForLlm": "> test\n> jest\n\nTests:       12 passed, 12 total\n<exited with exit code 0>"
+  }
+}

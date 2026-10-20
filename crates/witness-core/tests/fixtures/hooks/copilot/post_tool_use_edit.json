@@ -1,0 +1,15 @@
+{
+  "sessionId": "c0p1l07-5e55-4a1b-9c2d-0e1f2a3b4c5d",
+  "timestamp": 1792468640000,
+  "cwd": "/home/user/my-project",
+  "toolName": "edit",
+  "toolArgs": {
+    "path": "/home/user/my-project/src/lib.rs",
+    "old_str": "    1\n",
+    "new_str": "    1 + 1\n"
+  },
+  "toolResult": {
+    "resultType": "success",
+    "textResultForLlm": "File /home/user/my-project/src/lib.rs updated."
+  }
+}

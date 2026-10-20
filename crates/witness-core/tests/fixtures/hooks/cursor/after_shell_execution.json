@@ -1,0 +1,9 @@
+{
+  "conversation_id": "cur-2f9a",
+  "generation_id": "gen-71c3",
+  "hook_event_name": "afterShellExecution",
+  "workspace_roots": ["/home/user/my-project"],
+  "command": "pytest -q",
+  "output": "...\n3 passed in 0.12s\n",
+  "duration": 1234
+}

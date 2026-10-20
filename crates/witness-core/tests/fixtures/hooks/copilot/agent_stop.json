@@ -1,0 +1,8 @@
+{
+  "sessionId": "c0p1l07-5e55-4a1b-9c2d-0e1f2a3b4c5d",
+  "timestamp": 1792468700000,
+  "cwd": "/home/user/my-project",
+  "transcriptPath": "/home/user/.copilot/session-state/c0p1l07.jsonl",
+  "stopReason": "end_turn",
+  "stop_hook_active": false
+}

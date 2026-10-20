@@ -48,6 +48,7 @@ pub fn parse_unified_diff(text: &str) -> Result<Vec<Hunk>, DiffParseError> {
                         continue;
                     }
                     Some(b'-') => {
+                        hunk.removed.push(line[1..].to_owned());
                         *old_left = old_left.saturating_sub(1);
                         continue;
                     }
@@ -98,6 +99,7 @@ pub fn parse_unified_diff(text: &str) -> Result<Vec<Hunk>, DiffParseError> {
                     new_start,
                     new_count,
                     added: Vec::new(),
+                    removed: Vec::new(),
                     binary: false,
                 },
                 old_count,
@@ -114,6 +116,7 @@ pub fn parse_unified_diff(text: &str) -> Result<Vec<Hunk>, DiffParseError> {
                 new_start: 0,
                 new_count: 0,
                 added: Vec::new(),
+                removed: Vec::new(),
                 binary: true,
             });
         }
@@ -285,6 +288,7 @@ mod tests {
                 prop_assert_eq!(got.new_start, *new_start);
                 prop_assert_eq!(got.new_count as usize, added.len());
                 prop_assert_eq!(&got.added, added);
+                prop_assert_eq!(&got.removed, removed);
             }
         }
 

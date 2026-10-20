@@ -120,6 +120,252 @@ fn is_pipefail(simple: &str) -> bool {
             .any(|w| w.starts_with('-') && !w.starts_with("--") && w.ends_with('o'))
 }
 
+/// Commands that never change files (given no output redirection).
+const READ_ONLY: &[&str] = &[
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "wc",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "ag",
+    "ack",
+    "fd",
+    "tree",
+    "pwd",
+    "echo",
+    "printf",
+    "which",
+    "whereis",
+    "type",
+    "file",
+    "stat",
+    "du",
+    "df",
+    "printenv",
+    "date",
+    "whoami",
+    "id",
+    "uname",
+    "hostname",
+    "true",
+    "false",
+    "test",
+    "[",
+    "basename",
+    "dirname",
+    "realpath",
+    "readlink",
+    "diff",
+    "cmp",
+    "uniq",
+    "cut",
+    "tr",
+    "column",
+    "jq",
+    "xxd",
+    "hexdump",
+    "od",
+    "md5sum",
+    "sha1sum",
+    "sha256sum",
+    "shasum",
+    "ps",
+    "sleep",
+    "cd",
+    "pushd",
+    "popd",
+    "export",
+    "unset",
+    "set",
+    "nproc",
+    "uptime",
+];
+
+/// `git` subcommands that leave the working tree alone.
+const GIT_READ_ONLY: &[&str] = &[
+    "status",
+    "log",
+    "diff",
+    "show",
+    "rev-parse",
+    "ls-files",
+    "ls-tree",
+    "blame",
+    "grep",
+    "describe",
+    "shortlog",
+    "reflog",
+    "cat-file",
+    "merge-base",
+    "rev-list",
+    "for-each-ref",
+    "show-ref",
+    "name-rev",
+    "config",
+    "remote",
+    "branch",
+    "tag",
+    "fetch",
+    "push",
+    "add",
+    "commit",
+    "notes",
+    "var",
+    "version",
+    "help",
+];
+
+/// `git` subcommands that replace working-tree files with other content
+/// (another branch, a stash, someone else's commits).
+const GIT_MOVES_WORKTREE: &[&str] = &[
+    "checkout",
+    "switch",
+    "reset",
+    "stash",
+    "pull",
+    "merge",
+    "rebase",
+    "cherry-pick",
+    "revert",
+    "am",
+    "bisect",
+    "worktree",
+    "restore",
+];
+
+/// Whether a command line moves the working tree to other content, e.g.
+/// `git checkout other-branch` or `git pull`. Files it changes are not the
+/// agent's edits.
+pub fn moves_worktree(command: &str) -> bool {
+    split(command).iter().any(|(text, _)| {
+        let words: Vec<&str> = strip_prefixes(text).split_whitespace().collect();
+        words
+            .first()
+            .is_some_and(|w| w.rsplit('/').next() == Some("git"))
+            && git_subcommand(&words).is_some_and(|sub| GIT_MOVES_WORKTREE.contains(&sub))
+    })
+}
+
+/// The subcommand of `git [global options] <subcommand> ...`.
+fn git_subcommand<'a>(words: &[&'a str]) -> Option<&'a str> {
+    let mut rest = words.iter().skip(1);
+    while let Some(w) = rest.next() {
+        match *w {
+            // Global options that take a separate value.
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" => {
+                rest.next();
+            }
+            w if w.starts_with('-') => {}
+            w => return Some(w),
+        }
+    }
+    None
+}
+
+/// Whether a command line can't change files in the working tree, so its
+/// effect needs no snapshot. Conservative: anything unrecognized counts as
+/// a possible writer.
+pub fn is_read_only(command: &str) -> bool {
+    let parts = split(command);
+    !parts.is_empty()
+        && parts.iter().all(|(text, _)| {
+            let simple = strip_prefixes(text);
+            !writes_through_redirect(simple) && simple_is_read_only(simple)
+        })
+}
+
+fn simple_is_read_only(simple: &str) -> bool {
+    let words: Vec<&str> = simple.split_whitespace().collect();
+    let Some(&first) = words.first() else {
+        return true;
+    };
+    let program = first.rsplit('/').next().unwrap_or(first);
+    let has = |flag: &str| {
+        words
+            .iter()
+            .any(|w| *w == flag || w.starts_with(&format!("{flag}=")))
+    };
+    match program {
+        "git" => git_subcommand(&words).is_some_and(|sub| GIT_READ_ONLY.contains(&sub)),
+        "find" => ![
+            "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls",
+        ]
+        .iter()
+        .any(|f| has(f)),
+        "sed" => !words
+            .iter()
+            .any(|w| w.starts_with("-i") || w.starts_with("--in-place")),
+        "sort" => !has("-o") && !has("--output"),
+        "witness" => words.get(1).is_some_and(|w| {
+            [
+                "report",
+                "status",
+                "explain",
+                "sessions",
+                "assume",
+                "doctor",
+                "--version",
+            ]
+            .contains(w)
+        }),
+        p => READ_ONLY.contains(&p),
+    }
+}
+
+/// Whether a simple command redirects output into a file (anything but a
+/// file descriptor or `/dev/null`).
+fn writes_through_redirect(simple: &str) -> bool {
+    let chars: Vec<char> = simple.chars().collect();
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else if c == '\\' && q == '"' {
+                    i += 1;
+                }
+            }
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c == '\\' => i += 1,
+            None if c == '>' => {
+                let mut j = i + 1;
+                if chars.get(j) == Some(&'>') || chars.get(j) == Some(&'|') {
+                    j += 1;
+                }
+                if chars.get(j) == Some(&'&') {
+                    // `>&2`, `2>&1`: duplicating a descriptor.
+                    i = j + 1;
+                    continue;
+                }
+                while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+                    j += 1;
+                }
+                let target: String = chars[j..]
+                    .iter()
+                    .take_while(|c| !c.is_whitespace())
+                    .collect();
+                if target != "/dev/null" {
+                    return true;
+                }
+                i = j;
+                continue;
+            }
+            None => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Classification of a whole command line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandVerdict {
@@ -135,7 +381,14 @@ pub fn classify(config: &Config, command: &str) -> CommandVerdict {
     let parts = split(command);
     let mut best: Option<(CommandClass, usize)> = None;
     for (idx, (text, _)) in parts.iter().enumerate() {
-        let class = config.classify_simple(strip_prefixes(text));
+        let simple = strip_prefixes(text);
+        // `witness exec` records the command it runs itself, with the exact
+        // exit code; counting the wrapper too would double it.
+        let class = if is_witness_exec(simple) {
+            CommandClass::Other
+        } else {
+            config.classify_simple(simple)
+        };
         if best.is_none_or(|(c, _)| class >= c) {
             best = Some((class, idx));
         }
@@ -158,6 +411,14 @@ pub fn classify(config: &Config, command: &str) -> CommandVerdict {
         class,
         exit_attributable,
     }
+}
+
+fn is_witness_exec(simple: &str) -> bool {
+    let mut words = simple.split_whitespace();
+    words
+        .next()
+        .is_some_and(|w| w.rsplit('/').next() == Some("witness"))
+        && words.next() == Some("exec")
 }
 
 const REDACTED: &str = "[REDACTED]";
@@ -329,6 +590,74 @@ mod tests {
         assert_eq!(
             verdict("set -e; cargo test | tail"),
             (CommandClass::Test, false)
+        );
+    }
+
+    #[test]
+    fn read_only_commands() {
+        for cmd in [
+            "ls -la",
+            "cat src/lib.rs | head -20",
+            "rg -n foo src/ && git status",
+            "git log --oneline -5",
+            "git diff HEAD~1 > /dev/null 2>&1",
+            "grep -r x . 2>&1",
+            "find . -name '*.rs'",
+            "sed -n 1,20p src/lib.rs",
+            "cd crates/x && git diff",
+            "echo 'a > b'",
+            "witness status",
+        ] {
+            assert!(is_read_only(cmd), "{cmd}");
+        }
+        for cmd in [
+            "cargo test",
+            "echo hi > notes.txt",
+            "cat a >> b",
+            "sed -i 's/a/b/' src/lib.rs",
+            "find . -name '*.tmp' -delete",
+            "git checkout main",
+            "git stash",
+            "rm -rf target",
+            "python gen.py",
+            "ls | tee files.txt",
+            "witness exec -- cargo test",
+            "",
+        ] {
+            assert!(!is_read_only(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn worktree_moving_git_commands() {
+        for cmd in [
+            "git checkout main",
+            "git -C . switch -c x",
+            "git stash && cargo test",
+            "git pull --rebase",
+            "git restore src/a.rs",
+        ] {
+            assert!(moves_worktree(cmd), "{cmd}");
+        }
+        for cmd in [
+            "git status",
+            "git apply fix.patch",
+            "cargo test",
+            "git commit -am x",
+        ] {
+            assert!(!moves_worktree(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn witness_exec_wrapper_is_not_counted() {
+        assert_eq!(
+            verdict("witness exec -- cargo test | tail -5").0,
+            CommandClass::Other
+        );
+        assert_eq!(
+            verdict("/usr/local/bin/witness exec cargo test").0,
+            CommandClass::Other
         );
     }
 

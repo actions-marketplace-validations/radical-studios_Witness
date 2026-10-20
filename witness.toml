@@ -4,6 +4,14 @@
 # Cap on how many sections the report flags for close review.
 max_flagged = 10
 
+[capture]
+# Snapshot the working tree around shell commands (and tools that report no
+# patch) so files they change are recorded. Snapshots use a private git index
+# under .witness/state/ and skip read-only commands.
+snapshots = true
+# A snapshot slower than this (ms) turns snapshots off for the session.
+snapshot_budget_ms = 500
+
 # Regexes matched against each simple command the agent runs, after leading
 # VAR=value assignments and wrappers (timeout, time, env, nice) are removed.
 # A passing `test` or `build` run after an edit marks that edit as checked.

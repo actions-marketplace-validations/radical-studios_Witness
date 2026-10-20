@@ -1,18 +1,13 @@
 //! `witness assume`: the agent records something it relied on without
 //! verifying it.
 
-use std::path::Path;
-
 use anyhow::{Context, Result, anyhow, bail};
 use time::OffsetDateTime;
-use witness_core::capture::{normalize, relative_to};
 use witness_core::command::redact;
-use witness_core::record::{
-    AGENT_CLAUDE_CODE, Event, EventKind, LineRange, MAX_ASSUMPTION_CHARS, truncate_chars,
-};
+use witness_core::record::{Event, EventKind, MAX_ASSUMPTION_CHARS, truncate_chars};
 
 use crate::cli::AssumeArgs;
-use crate::workspace;
+use crate::workspace::{self, parse_lines, repo_path};
 
 pub fn run(args: AssumeArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("finding the working directory")?;
@@ -31,19 +26,7 @@ pub fn run(args: AssumeArgs) -> Result<()> {
         bail!("assumption text is empty");
     }
 
-    let current = workspace::read_current_session(&root);
-    let session = args
-        .session
-        .or_else(|| {
-            std::env::var("WITNESS_SESSION_ID")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .or_else(|| current.as_ref().map(|(s, _)| s.clone()))
-        .unwrap_or_else(|| "manual".to_owned());
-    let agent = current
-        .map(|(_, agent)| agent)
-        .unwrap_or_else(|| AGENT_CLAUDE_CODE.to_owned());
+    let (session, agent) = workspace::session_for(&root, args.session, None);
 
     let event = Event::new(
         &session,
@@ -63,48 +46,12 @@ pub fn run(args: AssumeArgs) -> Result<()> {
     Ok(())
 }
 
-/// `10-24` or `7`.
-fn parse_lines(text: &str) -> Result<LineRange> {
-    let parse = |s: &str| -> Result<u32> {
-        let n: u32 = s
-            .trim()
-            .parse()
-            .with_context(|| format!("invalid line number {s:?} in --lines {text:?}"))?;
-        if n == 0 {
-            bail!("line numbers start at 1 (--lines {text:?})");
-        }
-        Ok(n)
-    };
-    match text.split_once('-') {
-        Some((a, b)) => Ok(LineRange::new(parse(a)?, parse(b)?)),
-        None => {
-            let n = parse(text)?;
-            Ok(LineRange::new(n, n))
-        }
-    }
-}
-
-fn repo_path(root: &Path, cwd: &Path, file: &str) -> Result<String> {
-    let path = Path::new(file);
-    let abs = if path.is_absolute() {
-        normalize(path)
-    } else {
-        normalize(&cwd.join(path))
-    };
-    // Either side may spell a symlinked directory differently (e.g.
-    // `/var` and `/private/var` on macOS); fall back to resolved paths.
-    let canonical = |p: &Path| std::fs::canonicalize(p).ok();
-    relative_to(&abs, &normalize(root))
-        .or_else(|| relative_to(&canonical(&abs)?, &canonical(root)?))
-        .or_else(|| {
-            let parent = canonical(abs.parent()?)?;
-            relative_to(&parent.join(abs.file_name()?), &canonical(root)?)
-        })
-        .ok_or_else(|| anyhow!("{file} is outside the repository at {}", root.display()))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use witness_core::record::LineRange;
+
     use super::*;
 
     #[test]

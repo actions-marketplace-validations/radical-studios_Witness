@@ -1,0 +1,16 @@
+{
+  "witness": 1,
+  "agent": "my-agent",
+  "event": "post_tool",
+  "session_id": "gen-1",
+  "cwd": "/home/user/my-project",
+  "turn": "t1",
+  "tool": {
+    "name": "shell",
+    "kind": "shell",
+    "call_id": "c1",
+    "command": "make test",
+    "exit_code": 2,
+    "output": "FAIL"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "witness": 1,
+  "agent": "my-agent",
+  "event": "post_tool",
+  "session_id": "gen-1",
+  "cwd": "/home/user/my-project",
+  "tool": {
+    "name": "write",
+    "kind": "edit",
+    "files": [
+      {"path": "notes/plan.md", "content": "one\ntwo\n", "created": true}
+    ]
+  }
+}

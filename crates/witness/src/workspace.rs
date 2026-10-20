@@ -4,13 +4,14 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use witness_core::Config;
-use witness_core::record::{Event, session_file_stem};
+use witness_core::capture::{normalize, relative_to};
+use witness_core::record::{Event, LineRange, session_file_stem};
 
-pub const WITNESS_DIR: &str = ".witness";
+pub use witness_core::config::{CONFIG_FILE, WITNESS_DIR};
 pub const SESSIONS_DIR: &str = ".witness/sessions";
-pub const CONFIG_FILE: &str = "witness.toml";
+pub const STATE_DIR: &str = ".witness/state";
 const CURRENT_SESSION: &str = ".witness/state/current-session";
 const HOOK_LOG: &str = ".witness/state/hook.log";
 /// The hook log is trimmed to its newest half once it grows past this.
@@ -119,6 +120,29 @@ pub fn write_current_session(root: &Path, session_id: &str, agent: &str) -> Resu
     fs::write(&path, line).with_context(|| format!("writing {}", path.display()))
 }
 
+/// The session and agent to record a manual event (`witness assume`,
+/// `record`, `exec`) under: `session`, else `$WITNESS_SESSION_ID`, else the
+/// session the hooks saw last; the agent is `agent`, else that session's.
+pub fn session_for(
+    root: &Path,
+    session: Option<String>,
+    agent: Option<String>,
+) -> (String, String) {
+    let current = read_current_session(root);
+    let session = session
+        .or_else(|| {
+            std::env::var("WITNESS_SESSION_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| current.as_ref().map(|(s, _)| s.clone()))
+        .unwrap_or_else(|| "manual".to_owned());
+    let agent = agent
+        .or_else(|| current.map(|(_, agent)| agent))
+        .unwrap_or_else(|| "manual".to_owned());
+    (session, agent)
+}
+
 pub fn read_current_session(root: &Path) -> Option<(String, String)> {
     let text = fs::read_to_string(root.join(CURRENT_SESSION)).ok()?;
     let line = text.lines().next()?;
@@ -132,6 +156,46 @@ pub fn read_current_session(root: &Path) -> Option<(String, String)> {
         a => a,
     };
     Some((session.to_owned(), agent.to_owned()))
+}
+
+/// `10-24` or `7`.
+pub fn parse_lines(text: &str) -> Result<LineRange> {
+    let parse = |s: &str| -> Result<u32> {
+        let n: u32 = s
+            .trim()
+            .parse()
+            .with_context(|| format!("invalid line number {s:?} in --lines {text:?}"))?;
+        if n == 0 {
+            bail!("line numbers start at 1 (--lines {text:?})");
+        }
+        Ok(n)
+    };
+    match text.split_once('-') {
+        Some((a, b)) => Ok(LineRange::new(parse(a)?, parse(b)?)),
+        None => {
+            let n = parse(text)?;
+            Ok(LineRange::new(n, n))
+        }
+    }
+}
+
+pub fn repo_path(root: &Path, cwd: &Path, file: &str) -> Result<String> {
+    let path = Path::new(file);
+    let abs = if path.is_absolute() {
+        normalize(path)
+    } else {
+        normalize(&cwd.join(path))
+    };
+    // Either side may spell a symlinked directory differently (e.g.
+    // `/var` and `/private/var` on macOS); fall back to resolved paths.
+    let canonical = |p: &Path| std::fs::canonicalize(p).ok();
+    relative_to(&abs, &normalize(root))
+        .or_else(|| relative_to(&canonical(&abs)?, &canonical(root)?))
+        .or_else(|| {
+            let parent = canonical(abs.parent()?)?;
+            relative_to(&parent.join(abs.file_name()?), &canonical(root)?)
+        })
+        .ok_or_else(|| anyhow!("{file} is outside the repository at {}", root.display()))
 }
 
 #[cfg(test)]

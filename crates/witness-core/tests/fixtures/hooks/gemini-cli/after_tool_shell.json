@@ -1,0 +1,16 @@
+{
+  "session_id": "gem-5b1d",
+  "transcript_path": "/home/user/.gemini/tmp/abc/chats/session.json",
+  "cwd": "/home/user/my-project",
+  "hook_event_name": "AfterTool",
+  "timestamp": "2026-10-20T03:37:00.000Z",
+  "tool_name": "run_shell_command",
+  "tool_input": {
+    "command": "go test ./...",
+    "description": "Run the tests"
+  },
+  "tool_response": {
+    "llmContent": "Command: go test ./...\nDirectory: (root)\nOutput: ok  \texample.com/app\t0.112s\nError: (none)\nExit Code: 0\n",
+    "returnDisplay": "ok  \texample.com/app\t0.112s"
+  }
+}

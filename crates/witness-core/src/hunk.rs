@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::record::LineRange;
+use crate::record::{Change, LineRange};
 
 /// One hunk of `git diff -U0 base...head`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,9 +13,12 @@ pub struct Hunk {
     pub old_count: u32,
     pub new_start: u32,
     pub new_count: u32,
-    /// Added lines without the leading `+`. Used for fingerprints only.
+    /// Added lines without the leading `+`.
     #[serde(skip)]
     pub added: Vec<String>,
+    /// Removed lines without the leading `-`.
+    #[serde(skip)]
+    pub removed: Vec<String>,
     /// Binary change: no line information, covers the whole file.
     #[serde(default)]
     pub binary: bool,
@@ -34,6 +37,22 @@ impl Hunk {
                 self.new_start,
                 self.new_start + self.new_count - 1,
             ))
+        }
+    }
+
+    /// The change this hunk makes, in the terms of [`Change`]: `-U0` puts a
+    /// pure deletion's `new_start` on the line before the gap, while a
+    /// change starts where the removed lines were.
+    pub fn change(&self) -> Change {
+        let start = if self.new_count == 0 {
+            self.new_start + 1
+        } else {
+            self.new_start
+        };
+        Change {
+            start,
+            removed: self.old_count,
+            added: self.new_count,
         }
     }
 
@@ -73,6 +92,7 @@ mod tests {
             new_start,
             new_count,
             added: Vec::new(),
+            removed: Vec::new(),
             binary: false,
         }
     }
@@ -85,6 +105,34 @@ mod tests {
         assert_eq!(hunk(5, 3).display_lines(), "5-7");
         assert_eq!(hunk(5, 1).display_lines(), "5");
         assert_eq!(hunk(9, 0).display_lines(), "after 9 (deletion)");
+    }
+
+    #[test]
+    fn change_follows_record_conventions() {
+        // `@@ -5,2 +4,0 @@`: lines 5-6 deleted; the gap is after line 4.
+        let mut h = hunk(4, 0);
+        h.old_start = 5;
+        h.old_count = 2;
+        assert_eq!(
+            h.change(),
+            Change {
+                start: 5,
+                removed: 2,
+                added: 0
+            }
+        );
+        assert_eq!(h.change().new_range(), LineRange::new(4, 5));
+        // `@@ -5,0 +6,2 @@`: two lines inserted at 6.
+        let mut h = hunk(6, 2);
+        h.old_count = 0;
+        assert_eq!(
+            h.change(),
+            Change {
+                start: 6,
+                removed: 0,
+                added: 2
+            }
+        );
     }
 
     #[test]
