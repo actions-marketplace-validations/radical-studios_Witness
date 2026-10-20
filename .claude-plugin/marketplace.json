@@ -1,0 +1,14 @@
+{
+  "name": "witness",
+  "description": "Witness: tells reviewers which parts of an AI-written change were verified and which were guessed.",
+  "owner": {
+    "name": "Radical Studios"
+  },
+  "plugins": [
+    {
+      "name": "witness",
+      "source": "./plugin/claude-code",
+      "description": "Records what the agent verified versus what it assumed, for pull request review."
+    }
+  ]
+}

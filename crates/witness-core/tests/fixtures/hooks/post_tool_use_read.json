@@ -1,0 +1,25 @@
+{
+  "session_id": "abc123",
+  "transcript_path": "/home/user/.claude/projects/-home-user-my-project/abc123.jsonl",
+  "cwd": "/home/user/my-project",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "/home/user/my-project/src/lib.rs",
+    "offset": 1,
+    "limit": 200
+  },
+  "tool_response": {
+    "type": "text",
+    "file": {
+      "filePath": "/home/user/my-project/src/lib.rs",
+      "content": "(file contents, never stored)",
+      "numLines": 40,
+      "startLine": 1,
+      "totalLines": 40
+    }
+  },
+  "tool_use_id": "toolu_01ABC128",
+  "duration_ms": 3
+}

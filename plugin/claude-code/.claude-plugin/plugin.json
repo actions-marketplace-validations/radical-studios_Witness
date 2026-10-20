@@ -1,0 +1,12 @@
+{
+  "name": "witness",
+  "displayName": "Witness",
+  "version": "0.1.0",
+  "description": "Records what the agent verified (tests run after edits, files read) versus what it assumed, so reviewers know where to look closely.",
+  "author": {
+    "name": "Radical Studios"
+  },
+  "repository": "https://github.com/radical-studios/witness",
+  "license": "Apache-2.0",
+  "keywords": ["code-review", "verification", "provenance"]
+}

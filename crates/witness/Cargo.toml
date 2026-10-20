@@ -1,0 +1,28 @@
+[package]
+name = "witness"
+description = "Tells reviewers which parts of an AI-written change were verified and which were guessed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "witness"
+path = "src/main.rs"
+
+[dependencies]
+witness-core.workspace = true
+witness-git.workspace = true
+witness-platform.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

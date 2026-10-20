@@ -1,0 +1,22 @@
+{
+  "session_id": "abc123",
+  "transcript_path": "/home/user/.claude/projects/-home-user-my-project/abc123.jsonl",
+  "cwd": "/home/user/my-project",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cargo test",
+    "description": "Run tests in the background",
+    "run_in_background": true
+  },
+  "tool_response": {
+    "stdout": "",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "backgroundTaskId": "bash_1"
+  },
+  "tool_use_id": "toolu_01ABC124",
+  "duration_ms": 9
+}
