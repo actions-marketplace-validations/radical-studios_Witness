@@ -736,3 +736,109 @@ fn post_from_a_fork_falls_back_to_the_summary() {
     );
     drop(api.requests());
 }
+
+/// In the default `remind` mode, a turn that ends with unchecked edits
+/// shows the user a note, and the agent gets the list once, with the next
+/// prompt.
+#[test]
+fn stop_reminds_about_unchecked_edits() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", "fn a() {}\n");
+    repo.init_witness();
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+
+    let agent = repo.claude("s1");
+    agent.edit("src/lib.rs", "fn a() {}", "fn a() { 1; }");
+    let out: serde_json::Value = serde_json::from_str(&agent.stop("Done.", false)).unwrap();
+    let note = out["systemMessage"].as_str().unwrap();
+    assert!(note.contains("1 section"), "{note}");
+
+    let context = agent.prompt();
+    assert!(context.contains("src/lib.rs:1"), "{context}");
+    assert!(context.contains("unverified"), "{context}");
+    assert_eq!(agent.prompt(), "", "a reminder is delivered once");
+
+    // The same list again isn't repeated to the agent.
+    assert!(agent.stop("Done.", false).contains("systemMessage"));
+    assert_eq!(agent.prompt(), "");
+
+    // Once the edit is tested, the turn ends quietly.
+    agent.bash("cargo test");
+    assert_eq!(agent.stop("Done.", false), "");
+    assert_eq!(agent.prompt(), "");
+
+    // Other sessions' edits are not this session's business.
+    repo.claude("s2")
+        .edit("src/lib.rs", "fn a() { 1; }", "fn a() { 2; }");
+    assert_eq!(agent.stop("Done.", false), "");
+
+    // A session that changed nothing leaves no record, claims included.
+    assert_eq!(repo.claude("chat").stop("All tests pass.", false), "");
+    assert!(!repo.abs(".witness/sessions/chat.jsonl").exists());
+}
+
+/// In `block` mode the agent is asked to continue, once per turn, and a
+/// contradicted claim is called out there and in the report.
+#[test]
+fn stop_blocks_and_checks_claims() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", "fn a() {}\n");
+    repo.init_witness();
+    let config = repo
+        .read("witness.toml")
+        .replace("[nudge]\nmode = \"remind\"", "[nudge]\nmode = \"block\"");
+    assert!(config.contains("mode = \"block\""));
+    repo.write("witness.toml", &config);
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+
+    let agent = repo.claude("s1");
+    agent.edit("src/lib.rs", "fn a() {}", "fn a() { 1; }");
+    agent.bash_fail("cargo test", 101);
+    let out: serde_json::Value =
+        serde_json::from_str(&agent.stop("Fixed it. All tests pass.", false)).unwrap();
+    assert_eq!(out["decision"], "block");
+    let reason = out["reason"].as_str().unwrap();
+    assert!(reason.contains("the tests pass"), "{reason}");
+    assert!(reason.contains("src/lib.rs:1 (failing)"), "{reason}");
+
+    // While continuing because of the block, it isn't blocked again.
+    let out: serde_json::Value =
+        serde_json::from_str(&agent.stop("Sorry, one test still fails.", true)).unwrap();
+    assert!(out.get("decision").is_none(), "{out}");
+
+    repo.commit_all("feature");
+    let report = repo.report_json("main", "HEAD");
+    let claims = report["contradicted_claims"].as_array().unwrap();
+    assert_eq!(claims.len(), 1, "{report:#}");
+    assert_eq!(claims[0]["claim"], "tests-pass");
+    let markdown = repo.report_markdown("main", "HEAD");
+    assert!(
+        markdown.contains("claude-code ended a turn saying the tests pass"),
+        "{markdown}"
+    );
+}
+
+/// With `[nudge] mode = "off"` the hook says nothing, but claims are still
+/// recorded for the report.
+#[test]
+fn nudges_can_be_turned_off() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", "fn a() {}\n");
+    repo.init_witness();
+    let config = repo
+        .read("witness.toml")
+        .replace("[nudge]\nmode = \"remind\"", "[nudge]\nmode = \"off\"");
+    repo.write("witness.toml", &config);
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+
+    let agent = repo.claude("s1");
+    agent.edit("src/lib.rs", "fn a() {}", "fn a() { 1; }");
+    assert_eq!(agent.stop("Done; the build succeeded.", false), "");
+    assert_eq!(agent.prompt(), "");
+    let log = repo.read(".witness/sessions/s1.jsonl");
+    assert!(log.contains(r#""kind":"claim""#), "{log}");
+    assert!(log.contains(r#""claim":"builds""#), "{log}");
+}

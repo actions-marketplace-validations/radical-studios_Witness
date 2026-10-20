@@ -294,7 +294,7 @@ fn append(path: &std::path::Path, text: &str) -> std::io::Result<()> {
 }
 
 /// The report for the branch plus uncommitted work, and notes for the user.
-fn worktree_report(repo: &Repo, base: &str) -> Result<(Report, Vec<String>)> {
+pub fn worktree_report(repo: &Repo, base: &str) -> Result<(Report, Vec<String>)> {
     let diff = worktree_diff(repo, base)?;
     let req = Request {
         base,

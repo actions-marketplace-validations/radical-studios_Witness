@@ -2,6 +2,7 @@
 //! classification and report rendering. Pure logic, no I/O.
 
 pub mod capture;
+pub mod claims;
 pub mod classify;
 pub mod command;
 pub mod config;

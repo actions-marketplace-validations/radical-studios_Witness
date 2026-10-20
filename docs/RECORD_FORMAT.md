@@ -152,6 +152,18 @@ it.
 | ------ | ------ | ----- |
 | `text` | string | One sentence. |
 
+### `claim`
+
+Written by the end-of-turn hook when the agent's final message asserts a
+result outright ("all tests pass", "it builds cleanly"). The message itself
+is never stored, only which claim it made and whether the record backed it
+up at that moment.
+
+| Field       | Type    | Notes |
+| ----------- | ------- | ----- |
+| `claim`     | string  | `tests-pass` or `builds`. |
+| `supported` | boolean | False when this session's sections were failing (or, for `tests-pass`, unchecked or only compiled). |
+
 ### `session_end`
 
 Written by the `SessionEnd` hook. Marks the log as complete.
@@ -164,6 +176,8 @@ Written by the `SessionEnd` hook. Marks the log as complete.
 
 
 - Tool output (`tool_response` contents, stdout, stderr, error text).
+- Prompts and agent messages. The end-of-turn hook reads the agent's final
+  message in memory to detect claims and keeps only the claim's kind.
 - File contents, including `old_string`, `new_string` and `content`. Capture
   reads them in memory to compute line ranges and drops them. Pre-tool file
   copies live only under `.witness/state/pre/` (ignored by git) and are

@@ -27,7 +27,10 @@ pub fn events_for(
         HookEvent::SessionEnd { reason } => vec![EventKind::SessionEnd {
             reason: reason.clone(),
         }],
-        HookEvent::SessionStart | HookEvent::Stop { .. } | HookEvent::Ignored(_) => Vec::new(),
+        HookEvent::SessionStart
+        | HookEvent::Prompt
+        | HookEvent::Stop { .. }
+        | HookEvent::Ignored(_) => Vec::new(),
     };
     kinds
         .into_iter()

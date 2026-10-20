@@ -32,6 +32,7 @@ pub enum ConfigError {
 pub struct RawConfig {
     pub report: ReportConfig,
     pub capture: CaptureConfig,
+    pub nudge: NudgeConfig,
     pub commands: CommandPatterns,
     pub tests: TestsConfig,
     pub attribution: AttributionConfig,
@@ -118,6 +119,35 @@ impl Default for AttributionConfig {
             ],
         }
     }
+}
+
+/// What Witness tells the agent when it finishes a turn with edits that
+/// failed or were never checked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NudgeConfig {
+    pub mode: NudgeMode,
+}
+
+impl Default for NudgeConfig {
+    fn default() -> Self {
+        Self {
+            mode: NudgeMode::Remind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NudgeMode {
+    /// Say nothing.
+    Off,
+    /// Show the user a short note when the turn ends, and give it to the
+    /// agent with the next prompt.
+    Remind,
+    /// Ask the agent to keep going (once per turn) until it checks its
+    /// edits or explains why it can't.
+    Block,
 }
 
 /// How hooks observe file changes.
@@ -470,6 +500,12 @@ paths = [
 {tests}
 ]
 
+# What to do when the agent ends a turn with edits that failed or were never
+# checked: "remind" (show a note, and pass it to the agent with the next
+# prompt), "block" (ask the agent to keep going once per turn), or "off".
+[nudge]
+mode = "{nudge}"
+
 [capture]
 # Snapshot the working tree around shell commands (and tools that report no
 # patch) so files they change are recorded. Snapshots use a private git index
@@ -531,6 +567,7 @@ agent_commits = [
             ))
             .collect::<Vec<_>>()
             .join("\n"),
+        nudge = "remind",
         snapshots = CaptureConfig::default().snapshots,
         budget = CaptureConfig::default().snapshot_budget_ms,
         test = list(&patterns.test),

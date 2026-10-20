@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
 use crate::cli::{HooksAction, HooksArgs};
-use crate::workspace;
+use crate::{guidance, workspace};
 
 /// One agent's hook configuration.
 struct AgentHooks {
@@ -57,6 +57,9 @@ const AGENTS: &[AgentHooks] = &[
                 Some("Bash|NotebookEdit|mcp__.*"),
                 "post-tool-use-failure",
             ),
+            ("UserPromptSubmit", None, "user-prompt-submit"),
+            ("Stop", None, "stop"),
+            ("SessionStart", None, "session-start"),
             ("SessionEnd", None, "session-end"),
         ],
         note: "Or install the Claude Code plugin instead: /plugin install witness@radical-studios",
@@ -68,6 +71,9 @@ const AGENTS: &[AgentHooks] = &[
         events: &[
             ("PreToolUse", Some("Bash|apply_patch"), "pre-tool-use"),
             ("PostToolUse", None, "post-tool-use"),
+            ("UserPromptSubmit", None, "user-prompt-submit"),
+            ("Stop", None, "stop"),
+            ("SessionStart", None, "session-start"),
             ("SessionEnd", None, "session-end"),
         ],
         note: "Codex loads project hooks from .codex/ in trusted projects.",
@@ -80,6 +86,7 @@ const AGENTS: &[AgentHooks] = &[
             ("preToolUse", None, "pre-tool-use"),
             ("postToolUse", None, "post-tool-use"),
             ("postToolUseFailure", None, "post-tool-use-failure"),
+            ("agentStop", None, "agent-stop"),
             ("sessionEnd", None, "session-end"),
         ],
         note: "Used by Copilot CLI and the Copilot cloud agent. The cloud agent needs \
@@ -92,6 +99,7 @@ const AGENTS: &[AgentHooks] = &[
         events: &[
             ("afterShellExecution", None, "after-shell-execution"),
             ("afterFileEdit", None, "after-file-edit"),
+            ("stop", None, "stop"),
         ],
         note: "Cursor support is beta.",
     },
@@ -106,6 +114,9 @@ const AGENTS: &[AgentHooks] = &[
                 "before-tool",
             ),
             ("AfterTool", None, "after-tool"),
+            ("BeforeAgent", None, "before-agent"),
+            ("AfterAgent", None, "after-agent"),
+            ("SessionStart", None, "session-start"),
             ("SessionEnd", None, "session-end"),
         ],
         note: "Gemini CLI support is beta.",
@@ -121,9 +132,16 @@ pub fn run(args: HooksArgs) -> Result<()> {
             status(&root);
             Ok(())
         }
-        HooksAction::Install { agents, all, force } => {
+        HooksAction::Install {
+            agents,
+            all,
+            force,
+            no_guidance,
+        } => {
             for hooks in select(&agents, all)? {
-                install(&root, hooks, force)?;
+                if install(&root, hooks, force)? && !no_guidance {
+                    add_guidance(&root, hooks.agent)?;
+                }
             }
             Ok(())
         }
@@ -133,6 +151,7 @@ pub fn run(args: HooksArgs) -> Result<()> {
                 if remove_entries(&path, hooks)? {
                     println!("witness: removed {} hooks from {}", hooks.agent, hooks.file);
                 }
+                remove_guidance(&root, hooks.agent)?;
             }
             Ok(())
         }
@@ -167,7 +186,8 @@ fn select(names: &[String], all: bool) -> Result<Vec<&'static AgentHooks>> {
         .collect()
 }
 
-fn install(root: &Path, hooks: &AgentHooks, force: bool) -> Result<()> {
+/// Writes the agent's hooks; false if it was skipped.
+fn install(root: &Path, hooks: &AgentHooks, force: bool) -> Result<bool> {
     let path = root.join(hooks.file);
     if hooks.agent == "claude-code" && plugin_enabled(&path) && !force {
         println!(
@@ -175,7 +195,7 @@ fn install(root: &Path, hooks: &AgentHooks, force: bool) -> Result<()> {
              hooks (pass --force to add them to the settings anyway)",
             hooks.file
         );
-        return Ok(());
+        return Ok(false);
     }
     let mut config = read_json(&path)?;
     strip_entries(&mut config, hooks);
@@ -183,7 +203,36 @@ fn install(root: &Path, hooks: &AgentHooks, force: bool) -> Result<()> {
     write_json(&path, &config)?;
     println!("witness: wrote {} hooks to {}", hooks.agent, hooks.file);
     println!("         {}", hooks.note);
+    Ok(true)
+}
+
+/// Adds Witness's guidance to the instruction file `agent` reads.
+fn add_guidance(root: &Path, agent: &str) -> Result<()> {
+    if let Some(file) = guidance::file_for(agent)
+        && guidance::write(&root.join(file))?
+    {
+        println!("witness: added Witness's section to {file}");
+    }
     Ok(())
+}
+
+/// Removes the guidance once no agent with hooks installed reads that file.
+fn remove_guidance(root: &Path, agent: &str) -> Result<()> {
+    let Some(file) = guidance::file_for(agent) else {
+        return Ok(());
+    };
+    let still_used = AGENTS
+        .iter()
+        .any(|other| guidance::file_for(other.agent) == Some(file) && installed(root, other));
+    if !still_used && guidance::remove(&root.join(file))? {
+        println!("witness: removed Witness's section from {file}");
+    }
+    Ok(())
+}
+
+/// Whether Witness's hooks for this agent are in its config file.
+fn installed(root: &Path, hooks: &AgentHooks) -> bool {
+    fs::read_to_string(root.join(hooks.file)).is_ok_and(|text| text.contains(&marker(hooks.agent)))
 }
 
 fn status(root: &Path) {
@@ -197,8 +246,7 @@ fn status(root: &Path) {
     );
     for hooks in AGENTS {
         let path = root.join(hooks.file);
-        let text = fs::read_to_string(&path).unwrap_or_default();
-        let state = if text.contains(&marker(hooks.agent)) {
+        let state = if installed(root, hooks) {
             "installed"
         } else if hooks.agent == "claude-code" && plugin_enabled(&path) {
             "via plugin"
@@ -207,6 +255,16 @@ fn status(root: &Path) {
         };
         println!("{:<12} {:<14} {}", hooks.agent, state, hooks.file);
     }
+    let mut files: Vec<&str> = AGENTS
+        .iter()
+        .filter_map(|a| guidance::file_for(a.agent))
+        .collect();
+    files.dedup();
+    for file in files {
+        if guidance::present(&root.join(file)) {
+            println!("guidance     {:<14} {file}", "present");
+        }
+    }
 }
 
 /// The text that identifies Witness's own entries.
@@ -214,11 +272,20 @@ fn marker(agent: &str) -> String {
     format!("hook --agent {agent} ")
 }
 
+/// Shown at session start in a Witness repository when the binary is
+/// missing (agents that read `systemMessage`).
+const MISSING_BINARY: &str = r#"{"systemMessage":"Witness: the witness binary is not installed, so this session is not recorded. Install it: curl -fsSL https://raw.githubusercontent.com/radical-studios/witness/main/install.sh | sh"}"#;
+
 /// A POSIX shell command that runs `witness hook` if the binary can be
 /// found and otherwise does nothing; it always exits 0.
 fn sh_command(agent: &str, event: &str) -> String {
+    let missing = if event == "session-start" && matches!(agent, "claude-code" | "codex") {
+        format!("{{ [ -d .witness ] && echo '{MISSING_BINARY}'; exit 0; }}")
+    } else {
+        "exit 0".to_owned()
+    };
     format!(
-        r#"W=$(command -v witness || echo "$HOME/.local/bin/witness"); [ -x "$W" ] || W="$HOME/.cargo/bin/witness"; [ -x "$W" ] || exit 0; "$W" hook --agent {agent} {event} || true"#
+        r#"W=$(command -v witness || echo "$HOME/.local/bin/witness"); [ -x "$W" ] || W="$HOME/.cargo/bin/witness"; [ -x "$W" ] || {missing}; "$W" hook --agent {agent} {event} || true"#
     )
 }
 
@@ -254,6 +321,8 @@ fn add_entries(config: &mut Value, hooks: &AgentHooks) {
                     "type": "command",
                     "command": sh_command(hooks.agent, event),
                 });
+                // The end-of-turn hook computes a report; give it longer.
+                let timeout = timeout.map(|t| if *event == "stop" { 30 } else { t });
                 if let (Some(t), Some(c)) = (timeout, command.as_object_mut()) {
                     c.insert("timeout".to_owned(), json!(t));
                 }
@@ -267,7 +336,7 @@ fn add_entries(config: &mut Value, hooks: &AgentHooks) {
                 "type": "command",
                 "bash": sh_command(hooks.agent, event),
                 "powershell": powershell_command(hooks.agent, event),
-                "timeoutSec": 10,
+                "timeoutSec": if *event == "agent-stop" { 30 } else { 10 },
             }),
             Format::Cursor => json!({ "command": sh_command(hooks.agent, event) }),
         };
@@ -444,14 +513,10 @@ mod tests {
         let plugin: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         let mut ours = json!({});
         add_entries(&mut ours, agent("claude-code"));
-        // The plugin's SessionEnd hook has no timeout; compare the rest.
-        let strip = |mut v: Value| {
-            if let Some(end) = v.pointer_mut("/hooks/SessionEnd/0/hooks/0") {
-                end.as_object_mut().unwrap().remove("timeout");
-            }
-            v
-        };
-        assert_eq!(strip(plugin), strip(ours));
+        assert_eq!(
+            plugin, ours,
+            "regenerate plugin/claude-code/hooks/hooks.json"
+        );
     }
 
     #[test]
@@ -459,5 +524,16 @@ mod tests {
         let cmd = sh_command("codex", "post-tool-use");
         assert!(cmd.contains("|| exit 0"));
         assert!(cmd.ends_with("|| true"));
+        let start = sh_command("claude-code", "session-start");
+        assert!(
+            start.contains("[ -d .witness ] && echo '{\"systemMessage\""),
+            "{start}"
+        );
+    }
+
+    #[test]
+    fn missing_binary_notice_is_valid_json() {
+        let v: Value = serde_json::from_str(MISSING_BINARY).unwrap();
+        assert!(v["systemMessage"].as_str().unwrap().contains("install.sh"));
     }
 }

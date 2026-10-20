@@ -20,6 +20,7 @@ use witness_core::capture::{
 use witness_core::record::{Event, EventKind};
 
 use crate::cli::{Cli, Command};
+use crate::nudge;
 use crate::snapshot::Snapshots;
 use crate::workspace;
 
@@ -55,7 +56,11 @@ pub fn run(agent: Option<&str>, event: &str) {
             return;
         }
     };
-    match record(&root, &input) {
+    let recorded = record(&root, &input);
+    if recorded.is_ok() {
+        reply(&root, &input, event);
+    }
+    match recorded {
         Err(err) => {
             eprintln!("witness hook {event}: {err:#}");
             workspace::log_hook(&root, &format!("{} {event}: error: {err:#}", input.agent));
@@ -72,6 +77,47 @@ pub fn run(agent: Option<&str>, event: &str) {
             );
         }
         Ok(()) => {}
+    }
+}
+
+/// Prints the hook's reply to the agent, if any (see [`nudge`]). Stdout
+/// carries nothing else, so agents can parse it.
+fn reply(root: &Path, input: &HookInput, event: &str) {
+    let (reply, name) = match &input.event {
+        HookEvent::Stop {
+            hook_active,
+            last_message,
+        } => {
+            match nudge::on_stop(
+                root,
+                &input.agent,
+                &input.session_id,
+                *hook_active,
+                last_message.as_deref(),
+            ) {
+                Ok(reply) => (reply, "Stop"),
+                Err(err) => {
+                    workspace::log_hook(
+                        root,
+                        &format!("{} {event}: no nudge: {err:#}", input.agent),
+                    );
+                    return;
+                }
+            }
+        }
+        HookEvent::Prompt => (
+            nudge::pending(root, &input.session_id),
+            if input.agent == "gemini-cli" {
+                "BeforeAgent"
+            } else {
+                "UserPromptSubmit"
+            },
+        ),
+        HookEvent::SessionStart => (nudge::pending(root, &input.session_id), "SessionStart"),
+        _ => return,
+    };
+    if let Some(text) = reply.and_then(|r| nudge::render(&input.agent, name, &r)) {
+        println!("{text}");
     }
 }
 

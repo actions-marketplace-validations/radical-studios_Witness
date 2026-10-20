@@ -9,7 +9,7 @@
 //! ```
 //!
 //! `event`: `pre_tool`, `post_tool`, `post_tool_failure`, `session_start`,
-//! `session_end` (with `reason`) or `stop`. `tool.kind`: `shell`, `edit`
+//! `prompt`, `session_end` (with `reason`) or `stop`. `tool.kind`: `shell`, `edit`
 //! (with `files: [{path, content?, created?, old?, new?}]`), `read` (with
 //! `files: [{path}]`), `no_write` or `unknown`.
 
@@ -28,6 +28,7 @@ pub fn parse(v: &Value) -> Result<HookInput, CaptureError> {
         "post_tool" => tool_event(v, Phase::Post),
         "post_tool_failure" => tool_event(v, Phase::PostFailure),
         "session_start" => HookEvent::SessionStart,
+        "prompt" => HookEvent::Prompt,
         "session_end" => HookEvent::SessionEnd {
             reason: owned_at(v, &["reason"]).unwrap_or_else(|| "other".to_owned()),
         },

@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::claims::Claim;
 use crate::classify::{Classifier, ClassifyContext, Evidence, Status, Verdict};
 use crate::config::Config;
 use crate::history::{HistoryStore, HunkFingerprint};
@@ -61,7 +62,19 @@ pub struct Report {
     /// Who did the work.
     #[serde(default)]
     pub agents: Vec<AgentSummary>,
+    /// Claims agents made at the end of a turn that the record contradicted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contradicted_claims: Vec<ClaimNote>,
     pub track_record: TrackRecordNote,
+}
+
+/// An agent's claim at the end of a turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimNote {
+    pub agent: String,
+    pub claim: Claim,
+    #[serde(with = "crate::record::timestamp")]
+    pub at: OffsetDateTime,
 }
 
 /// Runs kept in [`Report::runs`].
@@ -357,6 +370,22 @@ pub fn build(input: ReportInput<'_>) -> Report {
         skim,
         runs: runs(&analysis.timeline),
         agents: agents(&analysis.timeline),
+        contradicted_claims: analysis
+            .timeline
+            .events
+            .iter()
+            .filter_map(|p| match &p.event.kind {
+                EventKind::Claim {
+                    claim,
+                    supported: false,
+                } => Some(ClaimNote {
+                    agent: p.event.agent.clone(),
+                    claim: *claim,
+                    at: p.event.timestamp,
+                }),
+                _ => None,
+            })
+            .collect(),
         track_record,
     }
 }

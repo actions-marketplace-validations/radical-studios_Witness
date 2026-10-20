@@ -29,6 +29,12 @@ paths = [
   '**/src/test/**',
 ]
 
+# What to do when the agent ends a turn with edits that failed or were never
+# checked: "remind" (show a note, and pass it to the agent with the next
+# prompt), "block" (ask the agent to keep going once per turn), or "off".
+[nudge]
+mode = "remind"
+
 [capture]
 # Snapshot the working tree around shell commands (and tools that report no
 # patch) so files they change are recorded. Snapshots use a private git index

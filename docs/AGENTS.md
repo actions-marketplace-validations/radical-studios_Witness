@@ -14,6 +14,15 @@ The hooks run `witness hook --agent <agent> <event>`. They do nothing when
 the `witness` binary is missing or the repository has no `.witness/`, and
 they always exit 0, so they never block the agent.
 
+`witness hooks install` also adds a short Witness section (between
+`<!-- witness:begin -->` and `<!-- witness:end -->`) to the instruction file
+the agent reads: `AGENTS.md` for Codex, Copilot and Cursor, `GEMINI.md` for
+Gemini CLI, `CLAUDE.md` for Claude Code without the plugin. It asks the
+agent to run the checks that cover its edits, use `witness exec` for piped
+commands, record assumptions and run `witness status` before finishing.
+Pass `--no-guidance` to skip it; `witness hooks uninstall` removes it once
+no installed agent reads that file.
+
 ## Support matrix
 
 | Agent | Config written | Edits | Shell commands | Exit codes | Status |
@@ -53,13 +62,41 @@ Only paths, line ranges, 40-bit line hashes and redacted command text are
 stored; file contents, tool output and environment variables never are. See
 [RECORD_FORMAT.md](RECORD_FORMAT.md).
 
+## End-of-turn nudges
+
+When a turn ends, Witness looks at the sections this session wrote on the
+branch (including uncommitted work). If any are failing or were never
+checked, or the agent's last message claims "all tests pass" or "it builds"
+when the record disagrees, `[nudge] mode` in `witness.toml` decides what
+happens:
+
+- `remind` (default): the user sees a one-line note, and the agent gets the
+  list with the next prompt (or when the session resumes). The same list is
+  passed to the agent only once.
+- `block`: the agent is asked to continue and either check the sections or
+  say why it can't. Witness blocks at most once in a row; if the agent
+  stops again right away, it falls back to a reminder.
+- `off`: nothing is shown. Claims are still recorded for the report.
+
+| Agent | End of turn | Note for the user | Context for the agent | Block |
+| --- | --- | --- | --- | --- |
+| Claude Code | `Stop` | yes | `UserPromptSubmit`, `SessionStart` | yes |
+| Codex CLI | `Stop` | yes | `UserPromptSubmit`, `SessionStart` | yes |
+| GitHub Copilot | `agentStop` | no | no | yes |
+| Cursor | `stop` | no | no | yes (`followup_message`) |
+| Gemini CLI | `AfterAgent` | yes | `BeforeAgent`, `SessionStart` | yes |
+
+A contradicted claim is also listed in the report, under the headline.
+
 ## Per-agent notes
 
 ### Claude Code
 
 Install the plugin (`/plugin install witness@radical-studios`), which
-ships the hooks and a skill that teaches the agent to record assumptions,
-or run `witness hooks install claude-code` to add the hooks to
+ships the hooks, a skill that teaches the agent to verify its edits and
+record assumptions, and two commands: `/witness:status` (what is failing or
+unchecked right now) and `/witness:review` (review the branch following
+Witness's plan). Or run `witness hooks install claude-code` to add the hooks to
 `.claude/settings.json`. Don't do both: events would be recorded twice.
 The installer refuses when the plugin is enabled in that file.
 
@@ -89,14 +126,15 @@ result as unknown.
 ### Cursor (beta)
 
 `witness hooks install cursor` writes `.cursor/hooks.json` with
-`afterShellExecution` and `afterFileEdit`. Cursor's before-hooks expect a
+`afterShellExecution`, `afterFileEdit` and `stop`. Cursor's before-hooks expect a
 permission decision, which Witness doesn't make, so shell commands are
 compared with the session's previous snapshot.
 
 ### Gemini CLI (beta)
 
-`witness hooks install gemini-cli` adds `BeforeTool`, `AfterTool` and
-`SessionEnd` hooks to `.gemini/settings.json`.
+`witness hooks install gemini-cli` adds `BeforeTool`, `AfterTool`,
+`BeforeAgent`, `AfterAgent`, `SessionStart` and `SessionEnd` hooks to
+`.gemini/settings.json`.
 
 ## Agents without hooks
 
@@ -136,7 +174,9 @@ Wrapper scripts can also pipe Witness's own JSON format into
 ```
 
 - `event`: `pre_tool`, `post_tool`, `post_tool_failure`, `session_start`,
-  `session_end` (with `reason`) or `stop`.
+  `prompt`, `session_end` (with `reason`) or `stop` (with `last_message`
+  and `stop_hook_active`). `stop` and `prompt` may print a JSON reply on
+  stdout (`systemMessage`, or `decision: "block"` with a `reason`).
 - `tool.kind`: `shell` (`command`, `exit_code`, `output`, `background`),
   `edit` (`files: [{path, content?, created?, old?, new?}]`), `read`
   (`files: [{path}]`), `no_write` or `unknown`.

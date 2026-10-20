@@ -1,18 +1,45 @@
 ---
 name: witness
-description: Use when changing code or running tests in a repository that has a .witness/ directory. Record unverified assumptions with `witness assume` (an API's behavior, a data format, a default value, a business rule) and run tests without piping their output so the result is recorded.
+description: Use when changing code or running tests in a repository that has a .witness/ directory. Run the tests that cover your edits before finishing, record unverified assumptions with `witness assume`, use `witness exec` for piped commands, and check `witness status` before saying you're done.
 ---
 
 # Witness: say what you checked and what you guessed
 
 This repository uses Witness. Hooks already record the files you read, the
-edits you make and the commands you run, including whether tests or builds
-passed after your edits. Reviewers get a summary that says which sections
-were verified and which were not.
+edits you make (including edits made through the shell) and the commands you
+run, with their real results. Reviewers get a plan that says which sections
+were tested, which only compiled, which failed and which were never checked,
+and they review the last kinds closely.
 
-Hooks can't see what you assumed. Record that yourself.
+What hooks can't see is what you assumed. Record that yourself.
 
-## When to record an assumption
+## Before you finish a task
+
+1. Run the tests or the build that cover the code you changed, after your
+   last edit. A run of another package doesn't count for these files, and a
+   test-name filter (`cargo test parse`, `pytest -k`) counts as partial.
+2. Run `witness status`. It lists this branch's sections that are failing,
+   guessed or unchecked, including uncommitted work. Check what you can; for
+   the rest, say in your reply why it couldn't be checked.
+3. Only say the tests pass or the build succeeds if you ran them after your
+   last edit and they did. Witness compares that sentence with the record,
+   and a contradiction is shown to the reviewer.
+
+If the turn ends with unchecked edits, Witness shows the user a note and
+gives you the list with the next prompt. Treat it as a to-do list, not an
+error.
+
+## Commands whose output you pipe
+
+Witness reads the real exit code and the test summary of plain commands.
+When you pipe or filter the output, wrap the command so the real result is
+recorded:
+
+```bash
+witness exec -- cargo test --workspace 2>&1 | tail -40
+```
+
+## Record assumptions
 
 Run `witness assume` right after you write code that relies on something you
 did not verify in this session, for example:
@@ -23,11 +50,6 @@ did not verify in this session, for example:
 - a default value or configuration you didn't look up;
 - a business rule or requirement you inferred rather than read.
 
-If you checked it (read the source or docs, ran a test that exercises it,
-inspected real data), don't record it.
-
-## How
-
 ```bash
 witness assume --file src/billing/invoice.rs --lines 40-52 "Stripe returns amounts in cents for all currencies"
 ```
@@ -36,15 +58,17 @@ witness assume --file src/billing/invoice.rs --lines 40-52 "Stripe returns amoun
 - `--lines` is the range in the file as it is now; omit it if the
   assumption applies to the whole file.
 - The text is one sentence stating the assumption, not the code.
-- Never put secrets, tokens or personal data in the text.
+- Never put secrets, tokens or personal data in it.
 
-## Rules
+If you checked it (read the source or docs, ran a test that exercises it,
+inspected real data), don't record it. If a quick test or a read of the
+source would settle it, do that instead of assuming.
 
-- Never claim something was checked, tested or verified when it wasn't. If
-  you didn't run the tests after your last edit, say so.
-- Prefer verifying over assuming: if a quick test or a read of the source
-  would settle it, do that instead.
-- Record each assumption once, close to where you relied on it.
-- Let Witness see test and build results: run them without piping into
-  `tail`, `head` or `grep`, or start the command with `set -o pipefail;`.
-  A pipe otherwise hides the exit code, and the run won't count as a check.
+## Other commands
+
+- `witness explain src/parse.rs:42`: who wrote a line and what checked it.
+- `witness report --format text`: the full review plan for the branch.
+- `witness sessions`: the agent sessions recorded on this branch.
+
+Commit `.witness/sessions/` together with the code; reviewers' reports are
+built from it.

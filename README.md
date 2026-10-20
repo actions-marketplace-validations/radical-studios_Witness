@@ -28,8 +28,9 @@ Or build from source with Rust 1.88+:
 cargo install --git https://github.com/radical-studios/witness witness --locked
 ```
 
-Then add the Claude Code plugin, which installs the hooks and a skill that
-teaches the agent to record assumptions:
+Then add the Claude Code plugin, which installs the hooks, a skill that
+teaches the agent to verify its edits and record assumptions, and the
+`/witness:status` and `/witness:review` commands:
 
 ```text
 /plugin marketplace add radical-studios/witness
@@ -47,7 +48,9 @@ agent's own config file in the repository:
 witness hooks install codex copilot   # also: claude-code, cursor, gemini-cli, --all
 ```
 
-Agents without hooks can run commands through `witness exec -- cargo test`
+It also adds a short Witness section to the instruction file the agent
+reads (`AGENTS.md`, `GEMINI.md`, `CLAUDE.md`). Agents without hooks can run
+commands through `witness exec -- cargo test`
 and report edits with `witness record`. See [docs/AGENTS.md](docs/AGENTS.md)
 for what each agent supports.
 
@@ -111,6 +114,15 @@ Other commands:
 The base branch defaults to the CI target branch, else origin's default
 branch, else `main` or `master`; pass `--base` to choose. Report links
 point at the head commit on GitHub or GitLab when the remote is on one.
+
+### When the agent stops
+
+At the end of each turn, Witness checks the sections the session wrote. If
+some are failing or unchecked, or the agent says "all tests pass" when the
+record disagrees, you see a one-line note and the agent gets the list with
+your next prompt. Set `[nudge] mode = "block"` in `witness.toml` to have the
+agent keep going until it checks them or explains why it can't, or `"off"`
+to turn this off. Contradicted claims also appear in the report.
 
 ## In CI
 

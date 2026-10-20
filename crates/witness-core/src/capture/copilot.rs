@@ -50,6 +50,7 @@ pub fn parse(v: &Value, event_arg: &str) -> Result<HookInput, CaptureError> {
         "posttooluse" => tool_event(v, Phase::Post),
         "posttoolusefailure" => tool_event(v, Phase::PostFailure),
         "sessionstart" => HookEvent::SessionStart,
+        "userpromptsubmitted" | "userpromptsubmit" => HookEvent::Prompt,
         "sessionend" => HookEvent::SessionEnd {
             reason: owned_at(v, &["reason"]).unwrap_or_else(|| "other".to_owned()),
         },

@@ -95,6 +95,10 @@ pub enum HooksAction {
         /// Write Claude Code hooks even though the witness plugin is enabled.
         #[arg(long)]
         force: bool,
+        /// Don't add Witness's section to the agents' instruction files
+        /// (AGENTS.md, GEMINI.md, CLAUDE.md).
+        #[arg(long)]
+        no_guidance: bool,
     },
     /// Remove Witness's hooks; other hooks are kept.
     Uninstall {

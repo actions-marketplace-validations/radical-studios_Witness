@@ -45,6 +45,7 @@ pub fn parse(v: &Value) -> Result<HookInput, CaptureError> {
         "BeforeTool" => tool_event(v, Phase::Pre),
         "AfterTool" => tool_event(v, Phase::Post),
         "SessionStart" => HookEvent::SessionStart,
+        "BeforeAgent" => HookEvent::Prompt,
         "SessionEnd" => HookEvent::SessionEnd {
             reason: owned_at(v, &["reason"]).unwrap_or_else(|| "other".to_owned()),
         },

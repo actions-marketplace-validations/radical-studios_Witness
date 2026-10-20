@@ -332,6 +332,35 @@ impl ClaudeSession<'_> {
         stdout_of(&self.repo.witness(&args, None));
     }
 
+    /// The agent ends its turn with `message`; returns the hook's stdout.
+    pub fn stop(&self, message: &str, hook_active: bool) -> String {
+        let json = json!({
+            "session_id": self.id,
+            "cwd": self.cwd.to_str().unwrap(),
+            "hook_event_name": "Stop",
+            "stop_hook_active": hook_active,
+            "last_assistant_message": message,
+        })
+        .to_string();
+        stdout_of(&self.repo.witness(&["hook", "stop"], Some(&json)))
+    }
+
+    /// The user sends a prompt; returns the hook's stdout.
+    pub fn prompt(&self) -> String {
+        let json = json!({
+            "session_id": self.id,
+            "cwd": self.cwd.to_str().unwrap(),
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "next",
+        })
+        .to_string();
+        stdout_of(
+            &self
+                .repo
+                .witness(&["hook", "user-prompt-submit"], Some(&json)),
+        )
+    }
+
     pub fn end(&self) {
         let json = json!({
             "session_id": self.id,

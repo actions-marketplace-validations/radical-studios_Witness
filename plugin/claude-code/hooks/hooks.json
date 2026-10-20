@@ -1,47 +1,81 @@
 {
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|NotebookEdit|mcp__.*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "W=$(command -v witness || echo \"$HOME/.local/bin/witness\"); [ -x \"$W\" ] || W=\"$HOME/.cargo/bin/witness\"; [ -x \"$W\" ] || exit 0; \"$W\" hook --agent claude-code pre-tool-use || true",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Read|Bash|mcp__.*",
         "hooks": [
           {
-            "type": "command",
             "command": "W=$(command -v witness || echo \"$HOME/.local/bin/witness\"); [ -x \"$W\" ] || W=\"$HOME/.cargo/bin/witness\"; [ -x \"$W\" ] || exit 0; \"$W\" hook --agent claude-code post-tool-use || true",
-            "timeout": 10
+            "timeout": 10,
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Read|Bash|mcp__.*"
       }
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "Bash|NotebookEdit|mcp__.*",
         "hooks": [
           {
-            "type": "command",
             "command": "W=$(command -v witness || echo \"$HOME/.local/bin/witness\"); [ -x \"$W\" ] || W=\"$HOME/.cargo/bin/witness\"; [ -x \"$W\" ] || exit 0; \"$W\" hook --agent claude-code post-tool-use-failure || true",
-            "timeout": 10
+            "timeout": 10,
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": "Bash|NotebookEdit|mcp__.*"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "W=$(command -v witness || echo \"$HOME/.local/bin/witness\"); [ -x \"$W\" ] || W=\"$HOME/.cargo/bin/witness\"; [ -x \"$W\" ] || exit 0; \"$W\" hook --agent claude-code pre-tool-use || true",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|NotebookEdit|mcp__.*"
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "W=$(command -v witness || echo \"$HOME/.local/bin/witness\"); [ -x \"$W\" ] || W=\"$HOME/.cargo/bin/witness\"; [ -x \"$W\" ] || exit 0; \"$W\" hook --agent claude-code session-end || true"
+            "command": "W=$(command -v witness || echo \"$HOME/.local/bin/witness\"); [ -x \"$W\" ] || W=\"$HOME/.cargo/bin/witness\"; [ -x \"$W\" ] || exit 0; \"$W\" hook --agent claude-code session-end || true",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "W=$(command -v witness || echo \"$HOME/.local/bin/witness\"); [ -x \"$W\" ] || W=\"$HOME/.cargo/bin/witness\"; [ -x \"$W\" ] || { [ -d .witness ] && echo '{\"systemMessage\":\"Witness: the witness binary is not installed, so this session is not recorded. Install it: curl -fsSL https://raw.githubusercontent.com/radical-studios/witness/main/install.sh | sh\"}'; exit 0; }; \"$W\" hook --agent claude-code session-start || true",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "W=$(command -v witness || echo \"$HOME/.local/bin/witness\"); [ -x \"$W\" ] || W=\"$HOME/.cargo/bin/witness\"; [ -x \"$W\" ] || exit 0; \"$W\" hook --agent claude-code stop || true",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "W=$(command -v witness || echo \"$HOME/.local/bin/witness\"); [ -x \"$W\" ] || W=\"$HOME/.cargo/bin/witness\"; [ -x \"$W\" ] || exit 0; \"$W\" hook --agent claude-code user-prompt-submit || true",
+            "timeout": 10,
+            "type": "command"
           }
         ]
       }

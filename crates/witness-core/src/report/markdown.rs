@@ -125,6 +125,15 @@ fn render(report: &Report, detail: Detail) -> String {
         let _ = writeln!(out);
         let _ = writeln!(out, "{line}");
     }
+    for claim in &report.contradicted_claims {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "⚠ {} ended a turn saying {}, but its record didn't back that up.",
+            claim.agent,
+            claim.claim.describe()
+        );
+    }
 
     if !report.flagged.is_empty() {
         let _ = writeln!(out);

@@ -103,6 +103,9 @@ pub struct Evidence {
     pub last_edit: Option<OffsetDateTime>,
     /// Agent edits that wrote these lines.
     pub edits: usize,
+    /// Sessions those edits were made in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<String>,
     /// The run that decided the status, if one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunRef>,
@@ -270,6 +273,13 @@ impl Classifier for DefaultRules {
             evidence: Evidence {
                 last_edit: Some(last_edit.event.timestamp),
                 edits: edits.len(),
+                sessions: {
+                    let mut sessions: Vec<String> =
+                        edits.iter().map(|p| p.event.session_id.clone()).collect();
+                    sessions.sort();
+                    sessions.dedup();
+                    sessions
+                },
                 run: run.and_then(run_ref),
             },
         }

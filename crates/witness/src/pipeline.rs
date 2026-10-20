@@ -30,6 +30,12 @@ pub struct Repo {
 impl Repo {
     pub fn open() -> Result<Self> {
         let cwd = std::env::current_dir().context("finding the working directory")?;
+        Self::at(&cwd)
+    }
+
+    /// The repository containing `dir`.
+    pub fn at(dir: &Path) -> Result<Self> {
+        let cwd = dir.to_path_buf();
         let toplevel = GitCli::new(&cwd)
             .toplevel()
             .context("witness must run inside a git repository")?;

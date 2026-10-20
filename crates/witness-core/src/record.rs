@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::claims::Claim;
 use crate::scope::Scope;
 use crate::testsum::{RunOutcome, TestCounts};
 
@@ -94,6 +95,13 @@ pub enum EventKind {
     /// off for being too slow. Informational.
     Note {
         text: String,
+    },
+    /// The agent's final message of a turn claimed something checkable,
+    /// e.g. that the tests pass. Only the kind of claim is stored.
+    Claim {
+        claim: Claim,
+        /// Whether the record agreed when the turn ended.
+        supported: bool,
     },
 }
 
@@ -233,9 +241,10 @@ impl Event {
             EventKind::Edit { file, .. }
             | EventKind::Read { file }
             | EventKind::Assumption { file, .. } => Some(file),
-            EventKind::Command { .. } | EventKind::SessionEnd { .. } | EventKind::Note { .. } => {
-                None
-            }
+            EventKind::Command { .. }
+            | EventKind::SessionEnd { .. }
+            | EventKind::Note { .. }
+            | EventKind::Claim { .. } => None,
         }
     }
 

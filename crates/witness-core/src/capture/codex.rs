@@ -38,6 +38,7 @@ pub fn parse(v: &Value) -> Result<HookInput, CaptureError> {
         "PreToolUse" => tool_event(v, Phase::Pre),
         "PostToolUse" => tool_event(v, Phase::Post),
         "SessionStart" => HookEvent::SessionStart,
+        "UserPromptSubmit" => HookEvent::Prompt,
         "SessionEnd" => HookEvent::SessionEnd {
             reason: owned_at(v, &["reason", "source"]).unwrap_or_else(|| "other".to_owned()),
         },

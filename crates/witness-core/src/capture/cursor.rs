@@ -21,6 +21,7 @@ pub fn parse(v: &Value) -> Result<HookInput, CaptureError> {
         "afterShellExecution" => shell(v, Phase::Post),
         "afterFileEdit" => file_edit(v),
         "sessionStart" => HookEvent::SessionStart,
+        "beforeSubmitPrompt" => HookEvent::Prompt,
         "sessionEnd" => HookEvent::SessionEnd {
             reason: owned_at(v, &["reason"]).unwrap_or_else(|| "other".to_owned()),
         },

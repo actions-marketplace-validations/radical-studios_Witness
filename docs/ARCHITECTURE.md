@@ -79,6 +79,26 @@ the agent lands in the right session even when several are active.
 
 See [RECORD_FORMAT.md](RECORD_FORMAT.md) for the records.
 
+### End of turn (`witness/src/nudge.rs`)
+
+After recording, hooks for turn events may print one JSON reply on stdout
+(nothing else is ever printed there):
+
+- **Stop** (`Stop`, `agentStop`, `stop`, `AfterAgent`): computes the same
+  report as `witness status` (branch plus working tree) and keeps the
+  sections whose evidence names this session. Claims in the agent's last
+  message (`witness-core/src/claims.rs`: conservative patterns, skipped when
+  the sentence is negated, hedged or conditional) are checked against those
+  sections and stored as `claim` events. Then, per `[nudge] mode`: a note
+  for the user plus a reminder file under `.witness/state/reminders/`
+  (`remind`), a `decision: "block"` unless the agent is already continuing
+  because of one (`block`), or nothing (`off`).
+- **Prompt and session start**: a pending reminder is passed to the agent as
+  context once, then kept as `<session>.seen` so an unchanged list isn't
+  repeated.
+
+`nudge::render` turns a reply into each agent's output format.
+
 ## Core pipeline (`witness report`)
 
 1. **Hunks.** `git diff --no-color --no-ext-diff -U0 -M <base>...<head>`
@@ -227,6 +247,9 @@ builder.
 ```toml
 [report]
 max_flagged = 10          # cap on sections flagged for close review
+
+[nudge]
+mode = "remind"           # remind | block | off, at the end of each turn
 
 [commands]                # regexes, matched against each simple command
 test  = ['^cargo (\+\S+ )?(test|nextest)\b', ...]

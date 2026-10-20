@@ -72,6 +72,8 @@ pub enum HookEvent {
     SessionEnd {
         reason: String,
     },
+    /// The user submitted a prompt: a turn starts.
+    Prompt,
     /// The agent finished a turn.
     Stop {
         /// The agent is already continuing because a stop hook blocked.
